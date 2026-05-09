@@ -14,13 +14,26 @@ add_executable(flir_camera_calibration_node
   src/flir_camera_calibration_node.cpp
 )
 
+add_executable(flir_camera_extrinsic_calibration_node
+  src/flir_camera_extrinsic_calibration_node.cpp
+)
+
 target_compile_features(flir_camera_calibration_node PUBLIC cxx_std_17)
+target_compile_features(flir_camera_extrinsic_calibration_node PUBLIC cxx_std_17)
 
 target_include_directories(flir_camera_calibration_node PRIVATE
   ${OpenCV_INCLUDE_DIRS}
 )
 
+target_include_directories(flir_camera_extrinsic_calibration_node PRIVATE
+  ${OpenCV_INCLUDE_DIRS}
+)
+
 target_link_libraries(flir_camera_calibration_node
+  ${OpenCV_LIBS}
+)
+
+target_link_libraries(flir_camera_extrinsic_calibration_node
   ${OpenCV_LIBS}
 )
 
@@ -29,7 +42,14 @@ ament_target_dependencies(flir_camera_calibration_node
   sensor_msgs
 )
 
-install(TARGETS flir_camera_calibration_node
+ament_target_dependencies(flir_camera_extrinsic_calibration_node
+  rclcpp
+  sensor_msgs
+)
+
+install(TARGETS
+  flir_camera_calibration_node
+  flir_camera_extrinsic_calibration_node
   DESTINATION lib/${PROJECT_NAME}
 )
 

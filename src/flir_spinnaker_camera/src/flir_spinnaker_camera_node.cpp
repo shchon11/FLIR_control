@@ -187,6 +187,32 @@ bool ParseYamlBool(const std::string & raw_value, const char * field_name)
     std::string("Failed to parse boolean value '") + raw_value + "' for '" + field_name + "'.");
 }
 
+std::size_t CountLeadingSpaces(const std::string & value)
+{
+  return static_cast<std::size_t>(
+    std::distance(
+      value.begin(),
+      std::find_if(value.begin(), value.end(), [](char character) {
+        return character != ' ';
+      })));
+}
+
+std::optional<std::string> MatchYamlMapKey(const std::string & line)
+{
+  const std::string trimmed = TrimAscii(line);
+  if (trimmed.empty() || trimmed[0] == '#' || trimmed.back() != ':') {
+    return std::nullopt;
+  }
+
+  return StripMatchingQuotes(TrimAscii(trimmed.substr(0, trimmed.size() - 1U)));
+}
+
+bool IsYamlMapKey(const std::string & line, const char * key)
+{
+  const auto map_key = MatchYamlMapKey(line);
+  return map_key.has_value() && *map_key == key;
+}
+
 bool IsHostBigEndian()
 {
   constexpr std::uint16_t probe = 0x0102;
@@ -360,6 +386,12 @@ struct NamedStringParameter
 {
   std::string name;
   std::string value;
+};
+
+struct NamedBoolParameter
+{
+  std::string name;
+  bool value;
 };
 
 std::optional<RawOutputSpec> RawOutputSpecForPixelFormat(PixelFormatEnums pixel_format)
@@ -976,8 +1008,88 @@ private:
     return std::nullopt;
   }
 
+  std::optional<NamedBoolParameter> FindBoolParameterValue(
+    std::initializer_list<const char *> parameter_names) const
+  {
+    for (const char * parameter_name : parameter_names) {
+      rclcpp::Parameter parameter;
+      if (!get_parameter(parameter_name, parameter)) {
+        continue;
+      }
+
+      if (parameter.get_type() != rclcpp::ParameterType::PARAMETER_BOOL) {
+        continue;
+      }
+
+      return NamedBoolParameter{parameter_name, parameter.as_bool()};
+    }
+
+    return std::nullopt;
+  }
+
+  bool HasPendingControlOverride(std::initializer_list<const char *> parameter_names) const
+  {
+    return std::any_of(
+      pending_control_overrides_.begin(),
+      pending_control_overrides_.end(),
+      [&](const rclcpp::Parameter & parameter) {
+        return ParameterNameMatches(parameter.get_name(), parameter_names);
+      });
+  }
+
+  void RemovePendingControlOverrides(std::initializer_list<const char *> parameter_names)
+  {
+    pending_control_overrides_.erase(
+      std::remove_if(
+        pending_control_overrides_.begin(),
+        pending_control_overrides_.end(),
+        [&](const rclcpp::Parameter & parameter) {
+          return ParameterNameMatches(parameter.get_name(), parameter_names);
+        }),
+      pending_control_overrides_.end());
+  }
+
+  void NormalizeFrameRateStartupOverrides()
+  {
+    if (!HasPendingControlOverride({"camera.AcquisitionFrameRate", "camera.FrameRateHz_Val"})) {
+      return;
+    }
+
+    const auto frame_rate_enable = FindBoolParameterValue(
+      {"camera.AcquisitionFrameRateEnable", "camera.FrameRateEn_Val"});
+    if (!frame_rate_enable.has_value() || frame_rate_enable->value) {
+      return;
+    }
+
+    RCLCPP_WARN(
+      get_logger(),
+      "A manual frame-rate value is configured while '%s' is false. "
+      "Enabling it because FLIR AcquisitionFrameRateEnable means manual frame-rate limiting, "
+      "not frame-rate auto mode.",
+      frame_rate_enable->name.c_str());
+
+    set_parameter(rclcpp::Parameter(frame_rate_enable->name, true));
+    RemovePendingControlOverrides({"camera.AcquisitionFrameRateEnable", "camera.FrameRateEn_Val"});
+    pending_control_overrides_.emplace_back(frame_rate_enable->name, true);
+  }
+
   std::optional<std::string> ControlOverrideHint(const rclcpp::Parameter & parameter) const
   {
+    if (ParameterNameMatches(
+        parameter.get_name(),
+        {
+          "camera.AcquisitionFrameRate",
+          "camera.FrameRateHz_Val"}))
+    {
+      const auto frame_rate_enable = FindBoolParameterValue(
+        {"camera.AcquisitionFrameRateEnable", "camera.FrameRateEn_Val"});
+      if (frame_rate_enable.has_value() && !frame_rate_enable->value) {
+        return "Set '" + frame_rate_enable->name + "' to true before applying a manual frame-rate "
+               "override. FLIR AcquisitionFrameRateEnable means manual frame-rate limiting, "
+               "not frame-rate auto mode.";
+      }
+    }
+
     if (ParameterNameMatches(
         parameter.get_name(),
         {
@@ -1092,6 +1204,7 @@ private:
     RegisterWritableControlParameters(*camera_node_map_, ControlMapKind::Camera);
     RegisterWritableControlParameters(*stream_node_map_, ControlMapKind::Stream);
     RegisterWritableControlParameters(*tl_device_node_map_, ControlMapKind::TlDevice);
+    NormalizeFrameRateStartupOverrides();
     ApplyPendingControlOverrides();
 
     control_parameter_callback_handle_ = add_on_set_parameters_callback(
@@ -1491,16 +1604,12 @@ private:
     return qos;
   }
 
-  void ApplyCameraInfoYamlOverrides(const std::string & yaml_path)
+  void ApplyFlatCameraInfoYamlOverrides(
+    const std::vector<std::string> & lines,
+    const std::string & yaml_path)
   {
-    std::ifstream stream(yaml_path);
-    if (!stream.is_open()) {
-      throw std::runtime_error("Failed to open camera_info YAML file: " + yaml_path);
-    }
-
     bool saw_any_camera_info_value = false;
-    std::string line;
-    while (std::getline(stream, line)) {
+    for (const std::string & line : lines) {
       if (const auto value = MatchYamlScalarValue(line, "camera_info.distortion_model")) {
         camera_info_distortion_model_ = StripMatchingQuotes(*value);
         saw_any_camera_info_value = true;
@@ -1597,6 +1706,229 @@ private:
       yaml_path.c_str());
   }
 
+  void ApplySerialIndexedCameraInfoYamlOverrides(
+    const std::vector<std::string> & lines,
+    const std::string & yaml_path)
+  {
+    if (camera_serial_.empty()) {
+      throw std::runtime_error(
+        "camera_serial must be set when loading serial-indexed camera_info YAML: " + yaml_path);
+    }
+
+    bool in_registry = false;
+    bool in_target_serial = false;
+    bool in_camera_info = false;
+    bool in_roi = false;
+    bool saw_target_serial = false;
+    bool saw_any_camera_info_value = false;
+    std::size_t registry_indent = 0U;
+    std::size_t serial_indent = 0U;
+    std::size_t camera_info_indent = 0U;
+    std::size_t roi_indent = 0U;
+
+    for (const std::string & line : lines) {
+      const std::string trimmed = TrimAscii(line);
+      if (trimmed.empty() || trimmed[0] == '#') {
+        continue;
+      }
+
+      const std::size_t indent = CountLeadingSpaces(line);
+
+      if (!in_registry) {
+        if (IsYamlMapKey(line, "camera_info_by_serial")) {
+          in_registry = true;
+          registry_indent = indent;
+        }
+        continue;
+      }
+
+      if (indent <= registry_indent && !IsYamlMapKey(line, "camera_info_by_serial")) {
+        break;
+      }
+
+      if (indent == registry_indent + 2U) {
+        if (const auto serial_key = MatchYamlMapKey(line)) {
+          in_target_serial = *serial_key == camera_serial_;
+          saw_target_serial = saw_target_serial || in_target_serial;
+          serial_indent = indent;
+          in_camera_info = false;
+          in_roi = false;
+          continue;
+        }
+      }
+
+      if (!in_target_serial || indent <= serial_indent) {
+        continue;
+      }
+
+      if (IsYamlMapKey(line, "camera_info")) {
+        in_camera_info = true;
+        camera_info_indent = indent;
+        in_roi = false;
+        continue;
+      }
+
+      if (!in_camera_info) {
+        continue;
+      }
+
+      if (indent <= camera_info_indent) {
+        in_camera_info = false;
+        in_roi = false;
+        continue;
+      }
+
+      if (in_roi && indent <= roi_indent) {
+        in_roi = false;
+      }
+
+      if (IsYamlMapKey(line, "roi")) {
+        in_roi = true;
+        roi_indent = indent;
+        continue;
+      }
+
+      if (in_roi) {
+        if (const auto value = MatchYamlScalarValue(line, "x_offset")) {
+          camera_info_roi_x_offset_ = static_cast<std::uint32_t>(
+            ParseYamlNonNegativeInt(*value, "camera_info.roi.x_offset"));
+          saw_any_camera_info_value = true;
+          continue;
+        }
+
+        if (const auto value = MatchYamlScalarValue(line, "y_offset")) {
+          camera_info_roi_y_offset_ = static_cast<std::uint32_t>(
+            ParseYamlNonNegativeInt(*value, "camera_info.roi.y_offset"));
+          saw_any_camera_info_value = true;
+          continue;
+        }
+
+        if (const auto value = MatchYamlScalarValue(line, "height")) {
+          camera_info_roi_height_ = static_cast<std::uint32_t>(
+            ParseYamlNonNegativeInt(*value, "camera_info.roi.height"));
+          saw_any_camera_info_value = true;
+          continue;
+        }
+
+        if (const auto value = MatchYamlScalarValue(line, "width")) {
+          camera_info_roi_width_ = static_cast<std::uint32_t>(
+            ParseYamlNonNegativeInt(*value, "camera_info.roi.width"));
+          saw_any_camera_info_value = true;
+          continue;
+        }
+
+        if (const auto value = MatchYamlScalarValue(line, "do_rectify")) {
+          camera_info_roi_do_rectify_ = ParseYamlBool(*value, "camera_info.roi.do_rectify");
+          saw_any_camera_info_value = true;
+          continue;
+        }
+      }
+
+      if (const auto value = MatchYamlScalarValue(line, "distortion_model")) {
+        camera_info_distortion_model_ = StripMatchingQuotes(*value);
+        saw_any_camera_info_value = true;
+        continue;
+      }
+
+      if (const auto value = MatchYamlScalarValue(line, "d")) {
+        camera_info_d_ = ParseYamlDoubleList(*value, "camera_info.d");
+        saw_any_camera_info_value = true;
+        continue;
+      }
+
+      if (const auto value = MatchYamlScalarValue(line, "k")) {
+        camera_info_k_ = ToFixedArray<9>(
+          ParseYamlDoubleList(*value, "camera_info.k"),
+          "camera_info.k");
+        saw_any_camera_info_value = true;
+        continue;
+      }
+
+      if (const auto value = MatchYamlScalarValue(line, "r")) {
+        camera_info_r_ = ToFixedArray<9>(
+          ParseYamlDoubleList(*value, "camera_info.r"),
+          "camera_info.r");
+        saw_any_camera_info_value = true;
+        continue;
+      }
+
+      if (const auto value = MatchYamlScalarValue(line, "p")) {
+        camera_info_p_ = ToFixedArray<12>(
+          ParseYamlDoubleList(*value, "camera_info.p"),
+          "camera_info.p");
+        saw_any_camera_info_value = true;
+        continue;
+      }
+
+      if (const auto value = MatchYamlScalarValue(line, "binning_x")) {
+        camera_info_binning_x_ = static_cast<std::uint32_t>(
+          ParseYamlNonNegativeInt(*value, "camera_info.binning_x"));
+        saw_any_camera_info_value = true;
+        continue;
+      }
+
+      if (const auto value = MatchYamlScalarValue(line, "binning_y")) {
+        camera_info_binning_y_ = static_cast<std::uint32_t>(
+          ParseYamlNonNegativeInt(*value, "camera_info.binning_y"));
+        saw_any_camera_info_value = true;
+        continue;
+      }
+    }
+
+    if (!saw_target_serial) {
+      RCLCPP_WARN(
+        get_logger(),
+        "Camera info YAML file '%s' does not contain serial '%s'. "
+        "Using camera_info values from node parameters.",
+        yaml_path.c_str(),
+        camera_serial_.c_str());
+      return;
+    }
+
+    if (!saw_any_camera_info_value) {
+      RCLCPP_WARN(
+        get_logger(),
+        "Camera info YAML entry for serial '%s' in '%s' did not contain usable camera_info values. "
+        "Using camera_info values from node parameters.",
+        camera_serial_.c_str(),
+        yaml_path.c_str());
+      return;
+    }
+
+    RCLCPP_INFO(
+      get_logger(),
+      "Loaded serial-indexed camera_info calibration for serial '%s' from '%s'.",
+      camera_serial_.c_str(),
+      yaml_path.c_str());
+  }
+
+  void ApplyCameraInfoYamlOverrides(const std::string & yaml_path)
+  {
+    std::ifstream stream(yaml_path);
+    if (!stream.is_open()) {
+      throw std::runtime_error("Failed to open camera_info YAML file: " + yaml_path);
+    }
+
+    std::vector<std::string> lines;
+    std::string line;
+    while (std::getline(stream, line)) {
+      lines.push_back(line);
+    }
+
+    const bool has_serial_indexed_registry = std::any_of(
+      lines.begin(),
+      lines.end(),
+      [](const std::string & candidate) {
+        return IsYamlMapKey(candidate, "camera_info_by_serial");
+      });
+
+    if (has_serial_indexed_registry) {
+      ApplySerialIndexedCameraInfoYamlOverrides(lines, yaml_path);
+    } else {
+      ApplyFlatCameraInfoYamlOverrides(lines, yaml_path);
+    }
+  }
+
   std::vector<int> CompressionParameters() const
   {
     if (rgb_compression_format_ == "png") {
@@ -1619,7 +1951,7 @@ private:
 
   std::string CompressedFormatString() const
   {
-    return rgb_compression_format_ == "png" ? "rgb8; png compressed bgr8" : "rgb8; jpeg compressed bgr8";
+    return rgb_compression_format_ == "png" ? "png" : "jpeg";
   }
 
   sensor_msgs::msg::CompressedImage BuildCompressedImageMessage(
@@ -1753,6 +2085,12 @@ private:
     return msg;
   }
 
+  bool IsFatalAcquisitionException(const Spinnaker::Exception & exception) const
+  {
+    const std::string message = exception.what();
+    return message.find("Stream has been aborted") != std::string::npos;
+  }
+
   void AcquisitionLoop()
   {
     while (rclcpp::ok() && running_.load()) {
@@ -1816,6 +2154,15 @@ private:
         image->Release();
       } catch (const Spinnaker::Exception & exception) {
         if (!running_.load()) {
+          break;
+        }
+
+        if (IsFatalAcquisitionException(exception)) {
+          RCLCPP_ERROR(
+            get_logger(),
+            "Stopping acquisition after fatal Spinnaker stream error: %s",
+            exception.what());
+          running_.store(false);
           break;
         }
 

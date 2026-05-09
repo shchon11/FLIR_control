@@ -1,0 +1,11 @@
+flir_multicam:
+  ros__parameters:
+    cameras:
+      - name: camera0
+        serial: "25415248"
+        namespace: "camera0"
+        frame_id: "camera0_optical_frame"
+      - name: camera1
+        serial: "25415255"
+        namespace: "camera1"
+        frame_id: "camera1_optical_frame"

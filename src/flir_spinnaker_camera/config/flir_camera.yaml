@@ -7,7 +7,10 @@ flir_camera:
     camera_serial: ""
     camera_index: 0
     frame_id: "flir_camera_optical_frame"
-    acquisition_timeout_ms: 1000
+    # Keep this comfortably above the frame interval.
+    # For 1 Hz acquisition, 3000 ms prevents normal low-rate waits from being
+    # treated as Spinnaker receive errors.
+    acquisition_timeout_ms: 3000
     # Publisher QoS. best_effort + depth 5는 큰 이미지 토픽에서 subscriber 쪽 드롭이 쉽게 보일 수 있음.
     publisher_qos_reliability: "reliable"   # reliable | best_effort
     publisher_qos_depth: 20
@@ -43,10 +46,10 @@ flir_camera:
     # - 즉 packed 포맷의 이득은 주로 camera->PC 링크에서 생기고,
     #   ros2 topic bw /image_raw 에서는 그대로 보이지 않을 수 있습니다.
     auto_pixel_format: false
-    pixel_format: "BayerRG12p"
+    pixel_format: "BayerRG8"
     # OldestFirst: 쌓인 프레임을 순서대로 처리. 끊김은 줄 수 있지만 지연이 늘 수 있음.
     # NewestOnly : 오래된 프레임을 버리고 최신 프레임 위주로 처리. 지연은 적지만 점프처럼 보일 수 있음.
-    buffer_handling_mode: "OldestFirst"
+    buffer_handling_mode: "NewestOnly"
     color_processing: "hq_linear"
 
     # Topic output control
@@ -66,7 +69,7 @@ flir_camera:
     #   camera->PC 링크 대역폭은 줄이지 않습니다.
     # - JPEG: lossy, 보통 훨씬 작고 빠름
     # - PNG : lossless, 보통 더 크고 CPU 사용량이 큼
-    publish_raw: false
+    publish_raw: true
     publish_camera_info: true
     publish_metadata: true
     publish_rgb_compressed: true
@@ -122,10 +125,12 @@ flir_camera:
     # --------------------------------------------------------------------------
     # Acquisition / FPS
     # --------------------------------------------------------------------------
-    # Enables manual frame-rate control.
-    camera.AcquisitionFrameRateEnable: false
+    # Enables manual frame-rate limiting. This is not an "auto FPS" switch:
+    # true means the value below is applied, false means the camera free-runs /
+    # uses its own maximum feasible acquisition rate.
+    camera.AcquisitionFrameRateEnable: true
     # Target frame rate in Hz.
-    # camera.AcquisitionFrameRate: 30.0
+    camera.AcquisitionFrameRate: 5.0
     # Multi-frame / burst related controls if you need them:
     # camera.AcquisitionFrameCount: 1
     # camera.AcquisitionBurstFrameCount: 1
@@ -181,8 +186,8 @@ flir_camera:
     # ROI / resolution / sensor-side reduction
     # --------------------------------------------------------------------------
     # Width and height of the image in pixels.
-    camera.Width: 640
-    camera.Height: 480
+    camera.Width: 1920
+    camera.Height: 1200
     # ROI origin in pixels.
     # camera.OffsetX: 0
     # camera.OffsetY: 0
@@ -197,9 +202,9 @@ flir_camera:
     # Trigger / external I/O
     # --------------------------------------------------------------------------
     # Which trigger to configure.
-    # camera.TriggerSelector: "FrameStart"   # AcquisitionStart | FrameStart | FrameBurstStart
+    camera.TriggerSelector: "FrameStart"   # AcquisitionStart | FrameStart | FrameBurstStart
     # Enable or disable trigger mode.
-    # camera.TriggerMode: "Off"              # Off | On
+    camera.TriggerMode: "Off"              # Off | On
     # Trigger source.
     # camera.TriggerSource: "Software"       # Software | Line0 | Line2 | Line3 | ...
     # Optional related controls:
@@ -214,7 +219,7 @@ flir_camera:
     # Camera-side bandwidth limiting
     # --------------------------------------------------------------------------
     # Limits the maximum bandwidth streamed by the camera.
-    # camera.DeviceLinkThroughputLimit: 125000000
+    camera.DeviceLinkThroughputLimit: 30000000
     # Bandwidth reserve for link robustness / resends.
     # camera.DeviceLinkBandwidthReserve: 0
 
@@ -222,12 +227,12 @@ flir_camera:
     # Host stream receiver settings
     # --------------------------------------------------------------------------
     # Manual buffer count control on the host-side stream receiver.
-    # stream.StreamBufferCountMode: "Manual"
-    # stream.StreamBufferCountManual: 16
+    stream.StreamBufferCountMode: "Manual"
+    stream.StreamBufferCountManual: 32
     # Packet resend support for GigE cameras.
-    # stream.StreamPacketResendEnable: true
+    stream.StreamPacketResendEnable: true
     # Wait time after trailer reception before completing an image.
-    # stream.StreamPacketResendTimeout: 40
+    stream.StreamPacketResendTimeout: 80
     # CRC checking on received images.
     # stream.StreamCRCCheckEnable: false
     # Current camera exposes only: "Socket"

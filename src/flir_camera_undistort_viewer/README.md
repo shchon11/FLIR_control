@@ -42,6 +42,23 @@ ros2 launch flir_camera_undistort_viewer undistort_viewer.launch.py \
   output_topic:=/image_rgb/undistorted/compressed
 ```
 
+## 멀티캠 실행
+
+`multicam_undistort_viewer.launch.py`는
+`flir_spinnaker_camera/config/multicam_cameras.yaml`의 camera inventory를 읽고
+카메라별 viewer 노드를 하나씩 실행한다.
+
+```bash
+ros2 launch flir_camera_undistort_viewer multicam_undistort_viewer.launch.py
+```
+
+각 viewer는 namespace 내부의 relative topic을 사용한다.
+
+- `/camera0/image_rgb/compressed` + `/camera0/camera_info`
+- `/camera0/image_rgb/undistorted/compressed`
+- `/camera1/image_rgb/compressed` + `/camera1/camera_info`
+- `/camera1/image_rgb/undistorted/compressed`
+
 ## 메모
 
 - 기본 출력 QoS는 `best_effort`다.

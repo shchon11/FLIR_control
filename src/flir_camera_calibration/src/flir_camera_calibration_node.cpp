@@ -14,6 +14,7 @@
 #include <iomanip>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -38,6 +39,73 @@ std::string NormalizeName(std::string value)
   }
 
   return normalized;
+}
+
+std::string TrimAscii(std::string value)
+{
+  const auto is_space = [](unsigned char character) {
+      return std::isspace(character) != 0;
+    };
+
+  value.erase(
+    value.begin(),
+    std::find_if_not(value.begin(), value.end(), is_space));
+  value.erase(
+    std::find_if_not(value.rbegin(), value.rend(), is_space).base(),
+    value.end());
+  return value;
+}
+
+std::string StripMatchingQuotes(std::string value)
+{
+  if (value.size() >= 2U) {
+    const bool is_double_quoted = value.front() == '"' && value.back() == '"';
+    const bool is_single_quoted = value.front() == '\'' && value.back() == '\'';
+    if (is_double_quoted || is_single_quoted) {
+      return value.substr(1, value.size() - 2U);
+    }
+  }
+
+  return value;
+}
+
+std::string EscapeYamlDoubleQuoted(std::string value)
+{
+  std::string escaped;
+  escaped.reserve(value.size());
+  for (const char character : value) {
+    if (character == '\\' || character == '"') {
+      escaped.push_back('\\');
+    }
+    escaped.push_back(character);
+  }
+  return escaped;
+}
+
+std::size_t CountLeadingSpaces(const std::string & value)
+{
+  return static_cast<std::size_t>(
+    std::distance(
+      value.begin(),
+      std::find_if(value.begin(), value.end(), [](char character) {
+        return character != ' ';
+      })));
+}
+
+std::optional<std::string> MatchYamlMapKey(const std::string & line)
+{
+  const std::string trimmed = TrimAscii(line);
+  if (trimmed.empty() || trimmed[0] == '#' || trimmed.back() != ':') {
+    return std::nullopt;
+  }
+
+  return StripMatchingQuotes(TrimAscii(trimmed.substr(0, trimmed.size() - 1U)));
+}
+
+bool IsYamlMapKey(const std::string & line, const char * key)
+{
+  const auto map_key = MatchYamlMapKey(line);
+  return map_key.has_value() && *map_key == key;
 }
 
 std::string FormatDouble(double value)
@@ -84,6 +152,9 @@ public:
     output_yaml_path_(declare_parameter<std::string>(
         "output_yaml_path",
         "calibration/flir_camera_info.yaml")),
+    camera_serial_(declare_parameter<std::string>("camera_serial", "")),
+    camera_name_(declare_parameter<std::string>("camera_name", "")),
+    frame_id_(declare_parameter<std::string>("frame_id", "")),
     sample_image_dir_(declare_parameter<std::string>(
         "sample_image_dir",
         "calibration/captures")),
@@ -155,6 +226,8 @@ private:
   {
     bool has_frame = false;
     bool board_detected = false;
+    std::uint64_t received_sequence = 0;
+    std::uint64_t processed_sequence = 0;
     sensor_msgs::msg::CompressedImage::ConstSharedPtr message;
     sensor_msgs::msg::CompressedImage::_header_type header;
     cv::Mat annotated_preview_bgr;
@@ -209,9 +282,8 @@ private:
       latest_frame_.has_frame = true;
       latest_frame_.message = msg;
       latest_frame_.header = msg->header;
+      ++latest_frame_.received_sequence;
     }
-
-    ProcessFrame(msg);
   }
 
   cv::Mat DecodeCompressedImage(const sensor_msgs::msg::CompressedImage & msg) const
@@ -284,7 +356,7 @@ private:
       cv::Scalar(255, 255, 255));
     DrawOverlayText(
       image,
-      "Controls: [space] capture  [c] calibrate  [r] reset  [q] quit",
+      "space:capture  c:calib  r:reset  q:quit",
       2,
       cv::Scalar(255, 255, 255));
   }
@@ -295,27 +367,41 @@ private:
     int line_index,
     const cv::Scalar & color) const
   {
-    constexpr int left_margin = 16;
-    constexpr int top_margin = 28;
-    constexpr int line_spacing = 30;
+    constexpr int left_margin = 12;
+    constexpr int top_margin = 22;
+    constexpr int line_spacing = 24;
+    constexpr double base_scale = 0.58;
+    constexpr int foreground_thickness = 1;
+    constexpr int shadow_thickness = 3;
+    int baseline = 0;
+    const cv::Size text_size = cv::getTextSize(
+      text,
+      cv::FONT_HERSHEY_SIMPLEX,
+      base_scale,
+      foreground_thickness,
+      &baseline);
+    const int available_width = std::max(1, image.cols - left_margin * 2);
+    const double scale = text_size.width <= available_width ?
+      base_scale :
+      std::max(0.35, base_scale * static_cast<double>(available_width) / static_cast<double>(text_size.width));
     const cv::Point origin(left_margin, top_margin + line_index * line_spacing);
     cv::putText(
       image,
       text,
       origin,
       cv::FONT_HERSHEY_SIMPLEX,
-      0.8,
+      scale,
       cv::Scalar(0, 0, 0),
-      4,
+      shadow_thickness,
       cv::LINE_AA);
     cv::putText(
       image,
       text,
       origin,
       cv::FONT_HERSHEY_SIMPLEX,
-      0.8,
+      scale,
       color,
-      2,
+      foreground_thickness,
       cv::LINE_AA);
   }
 
@@ -351,14 +437,16 @@ private:
 
   void OnKeyboardTimer()
   {
-    if (!display_window_) {
-      return;
-    }
+    ProcessLatestFrame();
 
     LatestFrameState snapshot;
     {
       std::lock_guard<std::mutex> lock(latest_frame_mutex_);
       snapshot = latest_frame_;
+    }
+
+    if (!display_window_) {
+      return;
     }
 
     if (!snapshot.has_frame) {
@@ -377,7 +465,7 @@ private:
         cv::Size(),
         preview_scale_,
         preview_scale_,
-        cv::INTER_LINEAR);
+      cv::INTER_LINEAR);
     }
 
     cv::imshow(window_name_, display_image);
@@ -408,6 +496,24 @@ private:
       default:
         break;
     }
+  }
+
+  void ProcessLatestFrame()
+  {
+    sensor_msgs::msg::CompressedImage::ConstSharedPtr message;
+    std::uint64_t sequence = 0;
+    {
+      std::lock_guard<std::mutex> lock(latest_frame_mutex_);
+      if (latest_frame_.message == nullptr ||
+        latest_frame_.processed_sequence == latest_frame_.received_sequence)
+      {
+        return;
+      }
+      message = latest_frame_.message;
+      sequence = latest_frame_.received_sequence;
+    }
+
+    ProcessFrame(message, sequence);
   }
 
   void CaptureCurrentFrame()
@@ -468,11 +574,13 @@ private:
   {
     try {
       const std::filesystem::path output_dir(sample_image_dir_);
-      std::filesystem::create_directories(output_dir);
+      const std::filesystem::path serial_output_dir =
+        camera_serial_.empty() ? output_dir : output_dir / camera_serial_;
+      std::filesystem::create_directories(serial_output_dir);
 
       std::ostringstream filename;
       filename << "capture_" << std::setfill('0') << std::setw(3) << capture_index << ".jpg";
-      const std::filesystem::path image_path = output_dir / filename.str();
+      const std::filesystem::path image_path = serial_output_dir / filename.str();
       cv::imwrite(image_path.string(), image);
     } catch (const std::exception & exception) {
       RCLCPP_WARN(
@@ -599,7 +707,7 @@ private:
     return stream.str();
   }
 
-  void WriteCalibrationYaml(
+  void WriteLegacyCalibrationYaml(
     const cv::Mat & camera_matrix,
     const cv::Mat & distortion_coefficients,
     double rms,
@@ -647,6 +755,191 @@ private:
     stream << "  mean_reprojection_error: " << FormatDouble(mean_error) << "\n";
   }
 
+  std::vector<std::string> RenderSerialIndexedCalibrationEntry(
+    const std::vector<double> & k,
+    const std::vector<double> & d,
+    const std::vector<double> & r,
+    const std::vector<double> & p,
+    double rms,
+    double mean_error) const
+  {
+    std::vector<std::string> lines;
+    const std::string camera_name = camera_name_.empty() ? camera_serial_ : camera_name_;
+
+    lines.push_back("  \"" + EscapeYamlDoubleQuoted(camera_serial_) + "\":");
+    lines.push_back("    camera_name: \"" + EscapeYamlDoubleQuoted(camera_name) + "\"");
+    lines.push_back("    frame_id: \"" + EscapeYamlDoubleQuoted(frame_id_) + "\"");
+    lines.push_back("    camera_info:");
+    lines.push_back("      distortion_model: \"plumb_bob\"");
+    lines.push_back("      d: " + FormatYamlList(d));
+    lines.push_back("      k: " + FormatYamlList(k));
+    lines.push_back("      r: " + FormatYamlList(r));
+    lines.push_back("      p: " + FormatYamlList(p));
+    lines.push_back("      binning_x: 0");
+    lines.push_back("      binning_y: 0");
+    lines.push_back("      roi:");
+    lines.push_back("        x_offset: 0");
+    lines.push_back("        y_offset: 0");
+    lines.push_back("        height: 0");
+    lines.push_back("        width: 0");
+    lines.push_back("        do_rectify: false");
+    lines.push_back("    calibration:");
+    lines.push_back("      generated_at_utc: \"" + CurrentUtcTimestamp() + "\"");
+    lines.push_back("      image_width: " + std::to_string(calibration_image_size_.width));
+    lines.push_back("      image_height: " + std::to_string(calibration_image_size_.height));
+    lines.push_back("      board_cols: " + std::to_string(board_cols_));
+    lines.push_back("      board_rows: " + std::to_string(board_rows_));
+    lines.push_back("      square_size_m: " + FormatDouble(square_size_m_));
+    lines.push_back("      captured_frames: " + std::to_string(captured_image_points_.size()));
+    lines.push_back("      rms_reprojection_error: " + FormatDouble(rms));
+    lines.push_back("      mean_reprojection_error: " + FormatDouble(mean_error));
+    return lines;
+  }
+
+  std::vector<std::string> ReadExistingYamlLines(const std::filesystem::path & path) const
+  {
+    std::vector<std::string> lines;
+    std::ifstream input(path.string());
+    if (!input.is_open()) {
+      return lines;
+    }
+
+    std::string line;
+    while (std::getline(input, line)) {
+      lines.push_back(line);
+    }
+    return lines;
+  }
+
+  void WriteLines(const std::filesystem::path & output_path, const std::vector<std::string> & lines) const
+  {
+    std::ofstream stream(output_path.string());
+    if (!stream.is_open()) {
+      throw std::runtime_error("Failed to open calibration output file: " + output_yaml_path_);
+    }
+
+    for (const std::string & line : lines) {
+      stream << line << "\n";
+    }
+  }
+
+  void WriteSerialIndexedCalibrationYaml(
+    const cv::Mat & camera_matrix,
+    const cv::Mat & distortion_coefficients,
+    double rms,
+    double mean_error) const
+  {
+    const std::filesystem::path output_path(output_yaml_path_);
+    if (output_path.has_parent_path()) {
+      std::filesystem::create_directories(output_path.parent_path());
+    }
+
+    const std::vector<double> k = FlattenMatToDoubles(camera_matrix);
+    const std::vector<double> d = FlattenMatToDoubles(distortion_coefficients);
+    const std::vector<double> r = {
+      1.0, 0.0, 0.0,
+      0.0, 1.0, 0.0,
+      0.0, 0.0, 1.0
+    };
+    const std::vector<double> p = {
+      camera_matrix.at<double>(0, 0), 0.0, camera_matrix.at<double>(0, 2), 0.0,
+      0.0, camera_matrix.at<double>(1, 1), camera_matrix.at<double>(1, 2), 0.0,
+      0.0, 0.0, 1.0, 0.0
+    };
+    const std::vector<std::string> entry_lines =
+      RenderSerialIndexedCalibrationEntry(k, d, r, p, rms, mean_error);
+
+    std::vector<std::string> lines = ReadExistingYamlLines(output_path);
+    const auto registry_iter = std::find_if(
+      lines.begin(),
+      lines.end(),
+      [](const std::string & line) {
+        return IsYamlMapKey(line, "camera_info_by_serial");
+      });
+
+    if (registry_iter == lines.end()) {
+      std::vector<std::string> fresh_lines;
+      fresh_lines.push_back("version: 2");
+      fresh_lines.push_back("camera_info_by_serial:");
+      fresh_lines.insert(fresh_lines.end(), entry_lines.begin(), entry_lines.end());
+      WriteLines(output_path, fresh_lines);
+      return;
+    }
+
+    const std::size_t registry_index =
+      static_cast<std::size_t>(std::distance(lines.begin(), registry_iter));
+    const std::size_t registry_indent = CountLeadingSpaces(lines[registry_index]);
+    std::size_t registry_end = lines.size();
+    std::optional<std::size_t> target_start;
+    std::size_t target_end = lines.size();
+
+    for (std::size_t index = registry_index + 1U; index < lines.size(); ++index) {
+      const std::string trimmed = TrimAscii(lines[index]);
+      if (trimmed.empty() || trimmed[0] == '#') {
+        continue;
+      }
+
+      const std::size_t indent = CountLeadingSpaces(lines[index]);
+      if (indent <= registry_indent) {
+        registry_end = index;
+        break;
+      }
+
+      if (indent != registry_indent + 2U) {
+        continue;
+      }
+
+      const auto serial_key = MatchYamlMapKey(lines[index]);
+      if (!serial_key.has_value() || *serial_key != camera_serial_) {
+        continue;
+      }
+
+      target_start = index;
+      target_end = registry_end;
+      for (std::size_t end_index = index + 1U; end_index < lines.size(); ++end_index) {
+        const std::string end_trimmed = TrimAscii(lines[end_index]);
+        if (end_trimmed.empty() || end_trimmed[0] == '#') {
+          continue;
+        }
+
+        const std::size_t end_indent = CountLeadingSpaces(lines[end_index]);
+        if (end_indent <= registry_indent ||
+          (end_indent == registry_indent + 2U && MatchYamlMapKey(lines[end_index]).has_value()))
+        {
+          target_end = end_index;
+          break;
+        }
+      }
+      break;
+    }
+
+    if (target_start.has_value()) {
+      lines.erase(lines.begin() + static_cast<std::ptrdiff_t>(*target_start),
+        lines.begin() + static_cast<std::ptrdiff_t>(target_end));
+      lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(*target_start),
+        entry_lines.begin(), entry_lines.end());
+    } else {
+      lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(registry_end),
+        entry_lines.begin(), entry_lines.end());
+    }
+
+    WriteLines(output_path, lines);
+  }
+
+  void WriteCalibrationYaml(
+    const cv::Mat & camera_matrix,
+    const cv::Mat & distortion_coefficients,
+    double rms,
+    double mean_error) const
+  {
+    if (camera_serial_.empty()) {
+      WriteLegacyCalibrationYaml(camera_matrix, distortion_coefficients, rms, mean_error);
+      return;
+    }
+
+    WriteSerialIndexedCalibrationYaml(camera_matrix, distortion_coefficients, rms, mean_error);
+  }
+
   void ResetCapturedFrames()
   {
     captured_image_points_.clear();
@@ -655,7 +948,9 @@ private:
     RCLCPP_INFO(get_logger(), "Captured calibration frames cleared.");
   }
 
-  void ProcessFrame(const sensor_msgs::msg::CompressedImage::ConstSharedPtr & message)
+  void ProcessFrame(
+    const sensor_msgs::msg::CompressedImage::ConstSharedPtr & message,
+    std::uint64_t sequence)
   {
     if (message == nullptr) {
       return;
@@ -684,9 +979,13 @@ private:
     PublishAnnotatedImage(message->header, annotated_preview);
 
     std::lock_guard<std::mutex> lock(latest_frame_mutex_);
+    if (latest_frame_.received_sequence != sequence) {
+      return;
+    }
     latest_frame_.has_frame = true;
     latest_frame_.board_detected = board_detected;
     latest_frame_.header = message->header;
+    latest_frame_.processed_sequence = sequence;
     latest_frame_.annotated_preview_bgr = annotated_preview;
     latest_frame_.image_size = full_resolution_bgr.size();
   }
@@ -694,6 +993,9 @@ private:
   std::string input_topic_;
   std::string annotated_output_topic_;
   std::string output_yaml_path_;
+  std::string camera_serial_;
+  std::string camera_name_;
+  std::string frame_id_;
   std::string sample_image_dir_;
   int board_cols_;
   int board_rows_;

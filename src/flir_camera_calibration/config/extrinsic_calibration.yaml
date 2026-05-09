@@ -1,0 +1,30 @@
+flir_camera_extrinsic_calibration:
+  ros__parameters:
+    camera_namespaces: ["camera0", "camera1"]
+    camera_names: ["camera0", "camera1"]
+    camera_serials: ["24100001", "24100002"]
+    camera_frame_ids: ["camera0_optical_frame", "camera1_optical_frame"]
+    reference_camera: "camera0"
+    reference_frame: "flir_rig_frame"
+
+    image_topic: "image_rgb/compressed"
+    camera_info_topic: "camera_info"
+    output_yaml_path: "calibration/flir_camera_extrinsics.yaml"
+
+    board_cols: 6
+    board_rows: 5
+    square_size_m: 0.08
+    min_observations: 5
+    max_frame_age_ms: 500
+
+    display_window: true
+    window_name: "FLIR Extrinsic Calibration"
+    preview_max_width: 640
+    preview_fast_check: true
+
+    input_qos_reliability: "best_effort"
+    # Keep only the latest compressed frame; chessboard detection can be slower
+    # than the camera, and old queued frames create visible preview delay.
+    input_qos_depth: 1
+    camera_info_qos_reliability: "reliable"
+    camera_info_qos_depth: 1

@@ -80,6 +80,31 @@ ros2 launch flir_spinnaker_camera flir_camera.launch.py \
   camera_info_yaml_path:=calibration/flir_camera_info.yaml
 ```
 
+## 멀티캠 실행
+
+멀티캠 inventory는 `config/multicam_cameras.yaml`에서 관리한다. 토픽 구분은
+`camera0`, `camera1` 같은 namespace로 단순화하고, 실제 장치 매핑은 serial로 한다.
+
+```bash
+ros2 launch flir_spinnaker_camera multicam.launch.py
+```
+
+예시 토픽:
+
+- `/camera0/image_rgb/compressed`
+- `/camera0/camera_info`
+- `/camera1/image_rgb/compressed`
+- `/camera1/camera_info`
+
+모든 카메라 노드는 같은 `config/flir_camera.yaml`을 사용하며, launch에서는
+`camera_serial`, `frame_id`, `camera_info.yaml_path`만 카메라별로 override한다.
+
+모든 카메라에 같은 runtime parameter를 적용할 때는 repo root에서 helper를 쓸 수 있다.
+
+```bash
+python3 scripts/multicam_param_set.py camera.ExposureAuto Off
+```
+
 ## 운영 메모
 
 - `camera.ExposureAuto`가 `Continuous`나 `Once`면 수동 `camera.ExposureTime*`은 쓰기 불가가 될 수 있다.

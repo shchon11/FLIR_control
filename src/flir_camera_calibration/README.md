@@ -59,6 +59,38 @@ ros2 launch flir_spinnaker_camera flir_camera.launch.py \
   camera_info_yaml_path:=calibration/flir_camera_info.yaml
 ```
 
+## 멀티캠 intrinsic calibration
+
+멀티캠에서는 `src/flir_spinnaker_camera/config/multicam_cameras.yaml`의
+`camera0`, `camera1` inventory를 기준으로 대상 카메라를 고른다.
+
+```bash
+ros2 launch flir_camera_calibration multicam_calibration.launch.py camera_name:=camera0
+```
+
+저장 결과는 `calibration/flir_camera_info.yaml`의 `camera_info_by_serial` 아래에
+카메라 serial별 entry로 upsert된다. 캡처 이미지는 기본적으로
+`calibration/captures/<serial>/` 아래에 저장된다.
+
+## 멀티캠 extrinsic calibration
+
+여러 카메라가 같은 체커보드를 overlap region에서 볼 수 있게 둔 뒤 실행한다.
+
+```bash
+ros2 launch flir_camera_calibration multicam_extrinsic_calibration.launch.py
+```
+
+노드는 각 `/cameraN/image_rgb/compressed`와 `/cameraN/camera_info`를 구독하고,
+모든 카메라가 보드를 검출한 상태에서 사용자가 observation을 수동 수집한다.
+
+- `space`: 현재 observation 수동 캡처
+- `c`: `calibration/flir_camera_extrinsics.yaml` 저장
+- `r`: observation 초기화
+- `q` 또는 `Esc`: 종료
+
+기본 기준은 `camera0`이며, 저장된 transform은 `flir_rig_frame` 기준
+`cameraN_optical_frame` pose로 기록된다.
+
 ## 메모
 
 - `board_cols`, `board_rows`는 square 개수가 아니라 `inner corners` 기준이다.

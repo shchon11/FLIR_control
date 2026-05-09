@@ -28,6 +28,9 @@ def _build_node(context):
         "input_topic",
         "annotated_output_topic",
         "output_yaml_path",
+        "camera_serial",
+        "camera_name",
+        "frame_id",
         "sample_image_dir",
         "window_name",
         "input_qos_reliability",
@@ -110,6 +113,21 @@ def generate_launch_description():
                 "output_yaml_path",
                 default_value="",
                 description="Override the saved calibration YAML path.",
+            ),
+            DeclareLaunchArgument(
+                "camera_serial",
+                default_value="",
+                description="Optional camera serial used as the key in serial-indexed calibration YAML.",
+            ),
+            DeclareLaunchArgument(
+                "camera_name",
+                default_value="",
+                description="Optional logical camera name such as camera0.",
+            ),
+            DeclareLaunchArgument(
+                "frame_id",
+                default_value="",
+                description="Optional camera optical frame id stored with the calibration entry.",
             ),
             DeclareLaunchArgument(
                 "sample_image_dir",

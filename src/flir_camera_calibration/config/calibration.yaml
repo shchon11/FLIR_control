@@ -3,6 +3,9 @@ flir_camera_calibration:
     input_topic: "/image_rgb/compressed"
     annotated_output_topic: "/calibration/image_annotated/compressed"
     output_yaml_path: "calibration/flir_camera_info.yaml"
+    camera_serial: ""
+    camera_name: ""
+    frame_id: ""
     sample_image_dir: "calibration/captures"
 
     # Chessboard inner-corner count, not square count.
@@ -20,8 +23,9 @@ flir_camera_calibration:
 
     # Keep the subscription permissive so it can connect to sensor-data publishers.
     input_qos_reliability: "best_effort"
-    input_qos_depth: 10
+    # Calibration preview keeps only the newest frame to avoid UI delay buildup.
+    input_qos_depth: 1
 
     # Publish the annotated preview more reliably for tools that inspect the overlay.
     output_qos_reliability: "reliable"
-    output_qos_depth: 10
+    output_qos_depth: 1

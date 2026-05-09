@@ -2,6 +2,20 @@ build/
 install/
 log/
 
+# ROS bag recordings and storage shards
+bag/
+bags/
+*.bag
+*.db3
+*.db3-shm
+*.db3-wal
+*.mcap
+*.sqlite
+*.sqlite3
+
+# Generated dataset exports
+nuscenes_export/
+
 # Python cache / bytecode
 __pycache__/
 *.pyc
@@ -25,3 +39,9 @@ compile_commands.json
 
 # Calibration artifacts
 calibration/captures/
+
+# Camera capture / image dump artifacts
+captures/
+capture/
+captured_images/
+image_dumps/
