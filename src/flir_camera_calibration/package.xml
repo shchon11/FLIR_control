@@ -12,6 +12,7 @@
   <depend>libopencv-dev</depend>
   <depend condition="$ROS_VERSION == 2">rclcpp</depend>
   <depend condition="$ROS_VERSION == 1">roscpp</depend>
+  <exec_depend condition="$ROS_VERSION == 1">rospy</exec_depend>
   <depend>sensor_msgs</depend>
 
   <exec_depend condition="$ROS_VERSION == 2">launch</exec_depend>

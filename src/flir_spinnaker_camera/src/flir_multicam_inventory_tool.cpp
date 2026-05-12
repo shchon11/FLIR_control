@@ -311,52 +311,6 @@ bool ExecuteCommand(INodeMap & node_map, const char * node_name)
   return true;
 }
 
-bool ExecuteAutoForceIpForSerial(SystemPtr system, const std::string & serial)
-{
-  InterfaceList interface_list = system->GetInterfaces();
-  bool executed = false;
-
-  try {
-    for (std::size_t interface_index = 0; interface_index < interface_list.GetSize(); ++interface_index) {
-      InterfacePtr gev_interface = interface_list.GetByIndex(interface_index);
-      INodeMap & interface_node_map = gev_interface->GetTLNodeMap();
-      CIntegerPtr selector = interface_node_map.GetNode("DeviceSelector");
-      CCommandPtr auto_force_ip = interface_node_map.GetNode("GevDeviceAutoForceIP");
-      if (!IsReadable(selector) || !IsWritable(selector) || !IsWritable(auto_force_ip)) {
-        continue;
-      }
-
-      const std::int64_t original_selector = selector->GetValue();
-      const std::int64_t min_selector = selector->GetMin();
-      const std::int64_t max_selector = selector->GetMax();
-      for (std::int64_t index = max_selector; index >= min_selector; --index) {
-        selector->SetValue(index);
-        if (ReadString(interface_node_map, "DeviceSerialNumber") != serial) {
-          continue;
-        }
-
-        std::cout << "Executing AutoForceIP fallback for serial " << serial
-                  << " on interface index " << interface_index << "\n";
-        auto_force_ip->Execute();
-        executed = true;
-        break;
-      }
-      selector->SetValue(original_selector);
-
-      if (executed) {
-        break;
-      }
-    }
-
-    interface_list.Clear();
-  } catch (...) {
-    interface_list.Clear();
-    throw;
-  }
-
-  return executed;
-}
-
 bool ExecuteInterfaceForceIpForSerial(
   SystemPtr system,
   const std::string & serial,
@@ -856,19 +810,6 @@ void ApplyForceIpFromInventory(const std::vector<CameraEntry> & cameras, const O
                   << "/" << FormatIpv4Address(target_subnet_mask)
                   << " gateway=" << FormatIpv4Address(target_gateway) << "\n";
 
-        if (wrong_subnet.value_or(false)) {
-          try {
-            if (ExecuteAutoForceIpForSerial(system, serial) && options.force_ip_wait_after_ms > 0) {
-              std::this_thread::sleep_for(
-                std::chrono::milliseconds(options.force_ip_wait_after_ms));
-            }
-            camera_list.Clear();
-          } catch (const std::exception & auto_force_exception) {
-            std::cout << "AutoForceIP failed for serial " << serial
-                      << ": " << auto_force_exception.what() << "\n";
-          }
-        }
-
         if (!ExecuteInterfaceForceIpForSerial(
             system,
             serial,
@@ -905,20 +846,6 @@ void ApplyForceIpFromInventory(const std::vector<CameraEntry> & cameras, const O
           std::cout << "ForceIP verification failed for serial " << serial
                     << " attempt " << attempt << "/" << options.force_ip_max_attempts
                     << ": " << last_error << "\n";
-          if (attempt < options.force_ip_max_attempts) {
-            try {
-              if (ExecuteAutoForceIpForSerial(system, serial)) {
-                camera_list.Clear();
-                if (options.force_ip_wait_after_ms > 0) {
-                  std::this_thread::sleep_for(
-                    std::chrono::milliseconds(options.force_ip_wait_after_ms));
-                }
-              }
-            } catch (const std::exception & auto_force_exception) {
-              std::cout << "AutoForceIP fallback failed for serial " << serial
-                        << ": " << auto_force_exception.what() << "\n";
-            }
-          }
         }
       }
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert FLIR ROS 2 camera bags into an image-only nuScenes dataset."""
+"""Convert FLIR ROS camera bags into an image-only nuScenes dataset."""
 
 from __future__ import annotations
 
@@ -17,13 +17,39 @@ from typing import Any
 import cv2
 import numpy as np
 import yaml
-from rclpy.serialization import deserialize_message
 from sensor_msgs.msg import CameraInfo, CompressedImage, Image
+
+try:
+    import rosbag
+except ImportError:  # pragma: no cover - depends on sourced ROS 1 environment.
+    rosbag = None
+
+try:
+    from rclpy.serialization import deserialize_message as deserialize_ros2_message
+except ImportError:  # pragma: no cover - only needed for ROS 2 sqlite3 bags.
+    deserialize_ros2_message = None
 
 
 SUPPORTED_IMAGE_TYPES = {
+    "sensor_msgs/CompressedImage",
+    "sensor_msgs/Image",
     "sensor_msgs/msg/CompressedImage",
     "sensor_msgs/msg/Image",
+}
+
+COMPRESSED_IMAGE_TYPES = {
+    "sensor_msgs/CompressedImage",
+    "sensor_msgs/msg/CompressedImage",
+}
+
+RAW_IMAGE_TYPES = {
+    "sensor_msgs/Image",
+    "sensor_msgs/msg/Image",
+}
+
+CAMERA_INFO_TYPES = {
+    "sensor_msgs/CameraInfo",
+    "sensor_msgs/msg/CameraInfo",
 }
 
 
@@ -32,6 +58,20 @@ class TopicRecord:
     topic_id: int
     name: str
     msg_type: str
+
+
+@dataclass(frozen=True)
+class BagSource:
+    path: Path
+    storage: str
+    db3_files: list[Path]
+    ros1_bag_files: list[Path]
+
+    @property
+    def output_name(self) -> str:
+        if self.storage == "ros1" and self.path.is_file():
+            return self.path.stem
+        return self.path.name
 
 
 @dataclass
@@ -63,7 +103,7 @@ class ImageRecord:
     msg_type: str
     timestamp_ns: int
     bag_timestamp_ns: int
-    data: bytes
+    data: Any
     format: str
     width: int | None = None
     height: int | None = None
@@ -89,7 +129,7 @@ class ConversionSummary:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Convert ROS 2 sqlite3 camera bags under FLIR_monocam_control/bags "
+            "Convert ROS camera bags under FLIR_control/bags "
             "to image-only nuScenes layout."
         )
     )
@@ -97,8 +137,8 @@ def parse_args() -> argparse.Namespace:
         "bag",
         nargs="?",
         help=(
-            "ROS 2 bag directory or .db3 file. Defaults to the newest directory "
-            "under ./bags that contains metadata.yaml."
+            "ROS 1 .bag, ROS 2 bag directory, or ROS 2 .db3 file. Defaults to "
+            "the newest bag under ./bags."
         ),
     )
     parser.add_argument(
@@ -173,7 +213,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--description",
-        default="FLIR multicamera ROS 2 bag converted to image-only nuScenes format.",
+        default="FLIR multicamera ROS bag converted to image-only nuScenes format.",
         help="Scene description.",
     )
     parser.add_argument(
@@ -199,31 +239,101 @@ def workspace_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def latest_bag_dir(root: Path) -> Path:
+def require_ros1_bag_module() -> Any:
+    if rosbag is None:
+        raise RuntimeError(
+            "ROS 1 bag support requires the rosbag Python module. "
+            "Run `source /opt/ros/noetic/setup.bash` or "
+            "`source scripts/setup_flir_env.bash` before this script."
+        )
+    return rosbag
+
+
+def require_ros2_deserializer() -> Any:
+    if deserialize_ros2_message is None:
+        raise RuntimeError(
+            "ROS 2 sqlite3 bag support requires rclpy. This Noetic workspace "
+            "can convert ROS 1 .bag files directly; pass a .bag file or record "
+            "with rosbag."
+        )
+    return deserialize_ros2_message
+
+
+def is_compressed_image_type(msg_type: str) -> bool:
+    return msg_type in COMPRESSED_IMAGE_TYPES
+
+
+def is_raw_image_type(msg_type: str) -> bool:
+    return msg_type in RAW_IMAGE_TYPES
+
+
+def is_camera_info_type(msg_type: str) -> bool:
+    return msg_type in CAMERA_INFO_TYPES
+
+
+def is_supported_image_type(msg_type: str) -> bool:
+    return msg_type in SUPPORTED_IMAGE_TYPES
+
+
+def is_ros_image_message(value: Any) -> bool:
+    return all(hasattr(value, field) for field in ("height", "width", "encoding", "step", "data"))
+
+
+def latest_bag_path(root: Path) -> Path:
     bags_root = root / "bags"
-    candidates = [
+    if not bags_root.exists():
+        raise FileNotFoundError(f"Bag directory does not exist: {bags_root}")
+
+    ros2_dirs = [
         path
         for path in bags_root.iterdir()
         if path.is_dir() and (path / "metadata.yaml").exists()
     ]
+    ros1_files = [path for path in bags_root.iterdir() if path.is_file() and path.suffix == ".bag"]
+    candidates = ros2_dirs + ros1_files
     if not candidates:
-        raise FileNotFoundError(f"No ROS 2 bag directories found under {bags_root}")
+        raise FileNotFoundError(f"No ROS .bag files or ROS 2 bag directories found under {bags_root}")
     return max(candidates, key=lambda path: path.stat().st_mtime)
 
 
-def resolve_bag(input_path: str | None, root: Path) -> tuple[Path, list[Path]]:
-    bag_path = Path(input_path).expanduser() if input_path else latest_bag_dir(root)
+def resolve_bag(input_path: str | None, root: Path) -> BagSource:
+    bag_path = Path(input_path).expanduser() if input_path else latest_bag_path(root)
     if not bag_path.is_absolute():
         bag_path = (root / bag_path).resolve()
 
+    if bag_path.is_file() and bag_path.suffix == ".bag":
+        return BagSource(
+            path=bag_path,
+            storage="ros1",
+            db3_files=[],
+            ros1_bag_files=[bag_path],
+        )
     if bag_path.is_file() and bag_path.suffix == ".db3":
-        return bag_path.parent, [bag_path]
+        return BagSource(
+            path=bag_path.parent,
+            storage="ros2",
+            db3_files=[bag_path],
+            ros1_bag_files=[],
+        )
     if bag_path.is_dir():
         db3_files = sorted(bag_path.glob("*.db3"))
         if db3_files:
-            return bag_path, db3_files
+            return BagSource(
+                path=bag_path,
+                storage="ros2",
+                db3_files=db3_files,
+                ros1_bag_files=[],
+            )
+        ros1_bag_files = sorted(bag_path.glob("*.bag"))
+        if ros1_bag_files:
+            return BagSource(
+                path=bag_path,
+                storage="ros1",
+                db3_files=[],
+                ros1_bag_files=ros1_bag_files,
+            )
 
-    raise FileNotFoundError(f"Could not find ROS 2 .db3 files for bag path: {bag_path}")
+    raise FileNotFoundError(f"Could not find ROS .bag or ROS 2 .db3 files for bag path: {bag_path}")
 
 
 def token_for(*parts: object) -> str:
@@ -236,11 +346,17 @@ def ns_to_us(timestamp_ns: int) -> int:
 
 
 def stamp_to_ns(stamp: Any, fallback_ns: int) -> int:
-    value = int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
+    if hasattr(stamp, "to_nsec"):
+        value = int(stamp.to_nsec())
+        return value if value > 0 else int(fallback_ns)
+
+    sec = getattr(stamp, "sec", getattr(stamp, "secs", 0))
+    nanosec = getattr(stamp, "nanosec", getattr(stamp, "nsecs", 0))
+    value = int(sec) * 1_000_000_000 + int(nanosec)
     return value if value > 0 else int(fallback_ns)
 
 
-def load_topics(db3_files: list[Path]) -> dict[int, TopicRecord]:
+def load_topics_ros2(db3_files: list[Path]) -> dict[int, TopicRecord]:
     topics: dict[int, TopicRecord] = {}
     for db3_file in db3_files:
         with sqlite3.connect(db3_file) as connection:
@@ -249,6 +365,28 @@ def load_topics(db3_files: list[Path]) -> dict[int, TopicRecord]:
             ):
                 topics[int(topic_id)] = TopicRecord(int(topic_id), str(name), str(msg_type))
     return topics
+
+
+def load_topics_ros1(bag_files: list[Path]) -> dict[int, TopicRecord]:
+    rosbag_module = require_ros1_bag_module()
+    topics_by_name: dict[str, TopicRecord] = {}
+    for bag_file in bag_files:
+        with rosbag_module.Bag(str(bag_file), "r") as bag:
+            _types, topic_infos = bag.get_type_and_topic_info()
+            for name, info in sorted(topic_infos.items()):
+                if name not in topics_by_name:
+                    topics_by_name[name] = TopicRecord(
+                        len(topics_by_name) + 1,
+                        str(name),
+                        str(info.msg_type),
+                    )
+    return {topic.topic_id: topic for topic in topics_by_name.values()}
+
+
+def load_topics(source: BagSource) -> dict[int, TopicRecord]:
+    if source.storage == "ros1":
+        return load_topics_ros1(source.ros1_bag_files)
+    return load_topics_ros2(source.db3_files)
 
 
 def camera_id_from_topic(topic: str) -> str:
@@ -353,12 +491,12 @@ def choose_image_topics(
         raw_topics = [
             topic
             for topic in topics.values()
-            if topic.msg_type == "sensor_msgs/msg/Image" and is_raw_image_topic(topic)
+            if is_raw_image_type(topic.msg_type) and is_raw_image_topic(topic)
         ]
         rgb_topics = [
             topic
             for topic in topics.values()
-            if topic.msg_type in SUPPORTED_IMAGE_TYPES and is_rgb_image_topic(topic)
+            if is_supported_image_type(topic.msg_type) and is_rgb_image_topic(topic)
         ]
         if not raw_topics:
             raise ValueError("No /image_raw sensor_msgs/Image topics found for --raw-and-rgb.")
@@ -369,7 +507,7 @@ def choose_image_topics(
         selected = [
             topic
             for topic in topics.values()
-            if topic.msg_type == "sensor_msgs/msg/Image" and is_raw_image_topic(topic)
+            if is_raw_image_type(topic.msg_type) and is_raw_image_topic(topic)
         ]
         if not selected:
             raise ValueError("No /image_raw sensor_msgs/Image topics found for --raw-bayer.")
@@ -377,7 +515,7 @@ def choose_image_topics(
         image_topics = [
             topic
             for topic in topics.values()
-            if topic.msg_type in SUPPORTED_IMAGE_TYPES and "/image" in topic.name
+            if is_supported_image_type(topic.msg_type) and "/image" in topic.name
         ]
         undistorted_topics = [topic for topic in image_topics if is_undistorted_topic(topic.name)]
         rgb_topics = [topic for topic in image_topics if is_rgb_image_topic(topic)]
@@ -387,21 +525,33 @@ def choose_image_topics(
     selected = sorted(selected, key=lambda topic: topic.name)
     if not selected:
         raise ValueError("No image topics found. Use --image-topic to select topics explicitly.")
-    unsupported = [topic for topic in selected if topic.msg_type not in SUPPORTED_IMAGE_TYPES]
+    unsupported = [topic for topic in selected if not is_supported_image_type(topic.msg_type)]
     if unsupported:
         details = ", ".join(f"{topic.name} ({topic.msg_type})" for topic in unsupported)
         raise ValueError(f"Unsupported image topic type(s): {details}")
     return selected
 
 
-def load_camera_info_from_bag(
+def camera_info_record_from_msg(msg: CameraInfo) -> CameraInfoRecord:
+    return CameraInfoRecord(
+        width=int(msg.width),
+        height=int(msg.height),
+        distortion_model=str(msg.distortion_model),
+        d=[float(value) for value in getattr(msg, "d", getattr(msg, "D", []))],
+        k=[float(value) for value in getattr(msg, "k", getattr(msg, "K", []))],
+        r=[float(value) for value in getattr(msg, "r", getattr(msg, "R", []))],
+        p=[float(value) for value in getattr(msg, "p", getattr(msg, "P", []))],
+    )
+
+
+def load_camera_info_from_ros2_bag(
     db3_files: list[Path],
     topics: dict[int, TopicRecord],
 ) -> dict[str, CameraInfoRecord]:
     info_topic_ids = {
         topic.topic_id: camera_id_from_topic(topic.name)
         for topic in topics.values()
-        if topic.msg_type == "sensor_msgs/msg/CameraInfo"
+        if is_camera_info_type(topic.msg_type)
     }
     camera_info: dict[str, CameraInfoRecord] = {}
     if not info_topic_ids:
@@ -415,19 +565,46 @@ def load_camera_info_from_bag(
                 camera_id = info_topic_ids.get(int(topic_id))
                 if camera_id is None or camera_id in camera_info:
                     continue
-                msg = deserialize_message(data, CameraInfo)
-                camera_info[camera_id] = CameraInfoRecord(
-                    width=int(msg.width),
-                    height=int(msg.height),
-                    distortion_model=str(msg.distortion_model),
-                    d=[float(value) for value in msg.d],
-                    k=[float(value) for value in msg.k],
-                    r=[float(value) for value in msg.r],
-                    p=[float(value) for value in msg.p],
-                )
+                msg = require_ros2_deserializer()(data, CameraInfo)
+                camera_info[camera_id] = camera_info_record_from_msg(msg)
                 if len(camera_info) == len(set(info_topic_ids.values())):
                     return camera_info
     return camera_info
+
+
+def load_camera_info_from_ros1_bag(
+    bag_files: list[Path],
+    topics: dict[int, TopicRecord],
+) -> dict[str, CameraInfoRecord]:
+    rosbag_module = require_ros1_bag_module()
+    info_topic_names = {
+        topic.name: camera_id_from_topic(topic.name)
+        for topic in topics.values()
+        if is_camera_info_type(topic.msg_type)
+    }
+    camera_info: dict[str, CameraInfoRecord] = {}
+    if not info_topic_names:
+        return camera_info
+
+    for bag_file in bag_files:
+        with rosbag_module.Bag(str(bag_file), "r") as bag:
+            for topic_name, msg, _bag_time in bag.read_messages(topics=sorted(info_topic_names)):
+                camera_id = info_topic_names.get(topic_name)
+                if camera_id is None or camera_id in camera_info:
+                    continue
+                camera_info[camera_id] = camera_info_record_from_msg(msg)
+                if len(camera_info) == len(set(info_topic_names.values())):
+                    return camera_info
+    return camera_info
+
+
+def load_camera_info_from_bag(
+    source: BagSource,
+    topics: dict[int, TopicRecord],
+) -> dict[str, CameraInfoRecord]:
+    if source.storage == "ros1":
+        return load_camera_info_from_ros1_bag(source.ros1_bag_files, topics)
+    return load_camera_info_from_ros2_bag(source.db3_files, topics)
 
 
 def load_camera_info_from_yaml(path: Path) -> dict[str, CameraInfoRecord]:
@@ -627,12 +804,17 @@ def undistort_image(
     return cv2.remap(image, map_x, map_y, interpolation)
 
 
-def read_images(
-    db3_files: list[Path],
+def build_stream_maps(
     selected_topics: list[TopicRecord],
     channel_overrides: dict[str, str],
-) -> tuple[dict[str, list[ImageRecord]], dict[str, str], dict[str, str]]:
-    topic_by_id = {topic.topic_id: topic for topic in selected_topics}
+) -> tuple[
+    dict[int, str],
+    dict[int, str],
+    dict[int, str],
+    dict[str, str],
+    dict[str, str],
+    dict[str, list[ImageRecord]],
+]:
     camera_by_topic = {topic.topic_id: camera_id_from_topic(topic.name) for topic in selected_topics}
     stream_kind_by_topic = {
         topic.topic_id: stream_kind_from_topic(topic.name) for topic in selected_topics
@@ -664,6 +846,30 @@ def read_images(
         for topic_id, stream_id in stream_by_topic.items()
     }
     frames_by_stream = {stream_id: [] for stream_id in channel_by_stream}
+    return (
+        camera_by_topic,
+        stream_kind_by_topic,
+        stream_by_topic,
+        camera_by_stream,
+        channel_by_stream,
+        frames_by_stream,
+    )
+
+
+def read_images_ros2(
+    db3_files: list[Path],
+    selected_topics: list[TopicRecord],
+    channel_overrides: dict[str, str],
+) -> tuple[dict[str, list[ImageRecord]], dict[str, str], dict[str, str]]:
+    topic_by_id = {topic.topic_id: topic for topic in selected_topics}
+    (
+        camera_by_topic,
+        stream_kind_by_topic,
+        stream_by_topic,
+        camera_by_stream,
+        channel_by_stream,
+        frames_by_stream,
+    ) = build_stream_maps(selected_topics, channel_overrides)
 
     for db3_file in db3_files:
         with sqlite3.connect(db3_file) as connection:
@@ -678,8 +884,8 @@ def read_images(
                 stream_id = stream_by_topic[int(topic_id)]
                 stream_kind = stream_kind_by_topic[int(topic_id)]
                 channel = channel_by_stream[stream_id]
-                if topic.msg_type == "sensor_msgs/msg/CompressedImage":
-                    msg = deserialize_message(data, CompressedImage)
+                if is_compressed_image_type(topic.msg_type):
+                    msg = require_ros2_deserializer()(data, CompressedImage)
                     frames_by_stream[stream_id].append(
                         ImageRecord(
                             stream_id=stream_id,
@@ -694,8 +900,8 @@ def read_images(
                             format=str(msg.format or "jpeg"),
                         )
                     )
-                elif topic.msg_type == "sensor_msgs/msg/Image":
-                    msg = deserialize_message(data, Image)
+                elif is_raw_image_type(topic.msg_type):
+                    msg = require_ros2_deserializer()(data, Image)
                     frames_by_stream[stream_id].append(
                         ImageRecord(
                             stream_id=stream_id,
@@ -716,6 +922,84 @@ def read_images(
     for frames in frames_by_stream.values():
         frames.sort(key=lambda frame: frame.timestamp_ns)
     return frames_by_stream, channel_by_stream, camera_by_stream
+
+
+def read_images_ros1(
+    bag_files: list[Path],
+    selected_topics: list[TopicRecord],
+    channel_overrides: dict[str, str],
+) -> tuple[dict[str, list[ImageRecord]], dict[str, str], dict[str, str]]:
+    rosbag_module = require_ros1_bag_module()
+    topic_by_name = {topic.name: topic for topic in selected_topics}
+    topic_id_by_name = {topic.name: topic.topic_id for topic in selected_topics}
+    (
+        camera_by_topic,
+        stream_kind_by_topic,
+        stream_by_topic,
+        camera_by_stream,
+        channel_by_stream,
+        frames_by_stream,
+    ) = build_stream_maps(selected_topics, channel_overrides)
+
+    for bag_file in bag_files:
+        with rosbag_module.Bag(str(bag_file), "r") as bag:
+            for topic_name, msg, bag_time in bag.read_messages(topics=sorted(topic_by_name)):
+                topic = topic_by_name.get(topic_name)
+                if topic is None:
+                    continue
+
+                topic_id = topic_id_by_name[topic_name]
+                bag_timestamp_ns = int(bag_time.to_nsec())
+                camera_id = camera_by_topic[topic_id]
+                stream_id = stream_by_topic[topic_id]
+                stream_kind = stream_kind_by_topic[topic_id]
+                channel = channel_by_stream[stream_id]
+                if is_compressed_image_type(topic.msg_type):
+                    frames_by_stream[stream_id].append(
+                        ImageRecord(
+                            stream_id=stream_id,
+                            camera_id=camera_id,
+                            stream_kind=stream_kind,
+                            channel=channel,
+                            topic=topic.name,
+                            msg_type=topic.msg_type,
+                            timestamp_ns=stamp_to_ns(msg.header.stamp, bag_timestamp_ns),
+                            bag_timestamp_ns=bag_timestamp_ns,
+                            data=bytes(msg.data),
+                            format=str(msg.format or "jpeg"),
+                        )
+                    )
+                elif is_raw_image_type(topic.msg_type):
+                    frames_by_stream[stream_id].append(
+                        ImageRecord(
+                            stream_id=stream_id,
+                            camera_id=camera_id,
+                            stream_kind=stream_kind,
+                            channel=channel,
+                            topic=topic.name,
+                            msg_type=topic.msg_type,
+                            timestamp_ns=stamp_to_ns(msg.header.stamp, bag_timestamp_ns),
+                            bag_timestamp_ns=bag_timestamp_ns,
+                            data=msg,
+                            format=str(msg.encoding),
+                            width=int(msg.width),
+                            height=int(msg.height),
+                        )
+                    )
+
+    for frames in frames_by_stream.values():
+        frames.sort(key=lambda frame: frame.timestamp_ns)
+    return frames_by_stream, channel_by_stream, camera_by_stream
+
+
+def read_images(
+    source: BagSource,
+    selected_topics: list[TopicRecord],
+    channel_overrides: dict[str, str],
+) -> tuple[dict[str, list[ImageRecord]], dict[str, str], dict[str, str]]:
+    if source.storage == "ros1":
+        return read_images_ros1(source.ros1_bag_files, selected_topics, channel_overrides)
+    return read_images_ros2(source.db3_files, selected_topics, channel_overrides)
 
 
 def group_samples(
@@ -808,7 +1092,7 @@ def write_image_file(
     if should_preserve_bayer:
         should_undistort = False
 
-    if record.msg_type == "sensor_msgs/msg/CompressedImage":
+    if is_compressed_image_type(record.msg_type):
         extension, fileformat = compressed_extension(record.data, record.format)
         relative_path = Path("samples") / record.channel / f"{filename_base}{extension}"
         image_path = output / relative_path
@@ -832,7 +1116,10 @@ def write_image_file(
             height, width = decoded.shape[:2]
         return relative_path.as_posix(), fileformat, width, height
 
-    msg = deserialize_message(record.data, Image)
+    if is_ros_image_message(record.data):
+        msg = record.data
+    else:
+        msg = require_ros2_deserializer()(record.data, Image)
     image = decode_raw_image(msg, preserve_bayer=should_preserve_bayer)
     if should_preserve_bayer:
         image = colorize_bayer_mosaic(image, msg.encoding)
@@ -1100,16 +1387,20 @@ def main() -> None:
         raise ValueError("Use only one of --raw-bayer or --raw-and-rgb.")
 
     root = workspace_root()
-    bag_dir, db3_files = resolve_bag(args.bag, root)
-    output = Path(args.output).expanduser() if args.output else root / "nuscenes_export" / bag_dir.name
+    bag_source = resolve_bag(args.bag, root)
+    output = (
+        Path(args.output).expanduser()
+        if args.output
+        else root / "nuscenes_export" / bag_source.output_name
+    )
     if not output.is_absolute():
         output = (root / output).resolve()
 
-    topics = load_topics(db3_files)
+    topics = load_topics(bag_source)
     selected_topics = choose_image_topics(topics, args.image_topic, args.raw_bayer, args.raw_and_rgb)
     channel_overrides = parse_channel_overrides(args.camera_channel)
     frames_by_stream, channel_by_stream, camera_by_stream = read_images(
-        db3_files,
+        bag_source,
         selected_topics,
         channel_overrides,
     )
@@ -1118,9 +1409,9 @@ def main() -> None:
         raise RuntimeError("No synchronized image samples could be formed from selected topics.")
 
     camera_info = load_camera_info_from_yaml((root / args.camera_info_yaml).resolve())
-    camera_info.update(load_camera_info_from_bag(db3_files, topics))
+    camera_info.update(load_camera_info_from_bag(bag_source, topics))
     extrinsics = load_extrinsics((root / args.extrinsics_yaml).resolve())
-    scene_name = args.scene_name or bag_dir.name
+    scene_name = args.scene_name or bag_source.output_name
     undistorted_export = not args.no_undistort
     preserve_bayer_raw = args.raw_bayer or args.raw_and_rgb
     frames_read_by_stream = {
@@ -1130,7 +1421,7 @@ def main() -> None:
 
     if args.dry_run:
         summary = ConversionSummary(
-            bag=bag_dir,
+            bag=bag_source.path,
             output=output,
             version=args.version,
             scene_name=scene_name,
@@ -1151,7 +1442,7 @@ def main() -> None:
     tables, frames_written_by_channel = build_tables(
         output=output,
         version=args.version,
-        bag_name=bag_dir.name,
+        bag_name=bag_source.output_name,
         scene_name=scene_name,
         description=args.description,
         groups=groups,
@@ -1165,7 +1456,7 @@ def main() -> None:
     write_json_tables(output, args.version, tables)
 
     summary = ConversionSummary(
-        bag=bag_dir,
+        bag=bag_source.path,
         output=output,
         version=args.version,
         scene_name=scene_name,

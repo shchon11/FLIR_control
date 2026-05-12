@@ -17,6 +17,11 @@ if("$ENV{ROS_VERSION}" STREQUAL "1")
     sensor_msgs
   )
 
+  install(PROGRAMS
+    scripts/noetic_intrinsic_calibration_node.py
+    scripts/noetic_extrinsic_calibration_node.py
+    DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+  )
   install(DIRECTORY launch config
     DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
   )

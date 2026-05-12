@@ -1,6 +1,6 @@
 # flir_spinnaker_camera
 
-FLIR/Spinnaker 카메라를 ROS 2 토픽으로 내보내는 메인 패키지다.
+FLIR/Spinnaker 카메라를 ROS 1 Noetic 토픽으로 내보내는 메인 패키지다.
 
 ## 역할
 
@@ -48,14 +48,14 @@ FLIR/Spinnaker 카메라를 ROS 2 토픽으로 내보내는 메인 패키지다.
 - `rgb_compression_format`
 - `rgb_jpeg_quality`
 - `rgb_png_compression_level`
-- `camera_info.yaml_path`
+- `camera_info_yaml_path`
 
 ## calibration 적용
 
 `flir_camera_calibration`에서 만든 YAML을 바로 적용할 수 있다.
 
 ```yaml
-camera_info.yaml_path: "calibration/flir_camera_info.yaml"
+camera_info_yaml_path:=calibration/flir_camera_info.yaml
 ```
 
 이 값이 비어 있지 않으면 저장된 `camera_info.*` 값이 `/camera_info` 퍼블리시에 반영된다.
@@ -63,16 +63,9 @@ camera_info.yaml_path: "calibration/flir_camera_info.yaml"
 ## 실행
 
 ```bash
-source scripts/setup_flir_env.bash
-ros2 launch flir_spinnaker_camera flir_camera.launch.py
-```
-
-ROS 1 Noetic에서는 catkin 빌드 후 Noetic launch 파일을 쓴다.
-
-```bash
 export FLIR_ROS_DISTRO=noetic
 source scripts/setup_flir_env.bash
-catkin_make
+catkin build flir_spinnaker_camera
 source devel/setup.bash
 roslaunch flir_spinnaker_camera noetic_flir_camera.launch
 ```
@@ -80,13 +73,13 @@ roslaunch flir_spinnaker_camera noetic_flir_camera.launch
 시리얼 지정 예:
 
 ```bash
-ros2 launch flir_spinnaker_camera flir_camera.launch.py camera_serial:=12345678
+roslaunch flir_spinnaker_camera noetic_flir_camera.launch camera_serial:=12345678
 ```
 
 캘리브레이션 YAML 적용 예:
 
 ```bash
-ros2 launch flir_spinnaker_camera flir_camera.launch.py \
+roslaunch flir_spinnaker_camera noetic_flir_camera.launch \
   camera_info_yaml_path:=calibration/flir_camera_info.yaml
 ```
 
@@ -96,15 +89,11 @@ ros2 launch flir_spinnaker_camera flir_camera.launch.py \
 `camera0`, `camera1` 같은 namespace로 단순화하고, 실제 장치 매핑은 serial로 한다.
 
 ```bash
-ros2 launch flir_spinnaker_camera multicam.launch.py
-```
-
-Noetic 멀티캠은 `config/multicam_cameras.yaml`을 같은 방식으로 읽어서
-한 ROS 1 노드 안에서 camera namespace별 publisher를 만든다.
-
-```bash
 roslaunch flir_spinnaker_camera noetic_multicam.launch
 ```
+
+`Unable to contact my own server`가 나오면 현재 PC에 없는 `ROS_IP`가 잡힌 상태다.
+repo root에서 `source scripts/setup_flir_env.bash`를 다시 실행한 뒤 launch한다.
 
 Noetic에서 extrinsic TF만 따로 띄울 수도 있다.
 
@@ -120,31 +109,36 @@ roslaunch flir_spinnaker_camera noetic_extrinsics_tf.launch
 - `/camera1/camera_info`
 
 모든 카메라 노드는 같은 `config/flir_camera.yaml`을 사용하며, launch에서는
-`camera_serial`, `frame_id`, `camera_info.yaml_path`만 카메라별로 override한다.
+`camera_serial`, `frame_id`, `camera_info_yaml_path`만 카메라별로 override한다.
 
 연결된 Spinnaker 카메라를 launch 전에 감지해서 inventory YAML을 자동 갱신할 수도 있다.
 기존 serial 설정은 유지하고, 새로 감지된 serial만 `cameraN` 항목으로 추가한다.
 
 ```bash
-ros2 launch flir_spinnaker_camera multicam.launch.py \
-  auto_update_cameras_file:=true
+# Noetic에서는 inventory tool을 직접 실행한다.
+rosrun flir_spinnaker_camera flir_multicam_inventory_tool \
+  --output src/flir_spinnaker_camera/config/multicam_cameras.yaml \
+  --dry-run
 ```
 
 카메라별 ForceIP도 함께 채우려면 시작 IP를 준다. 아래 예시는 새 카메라들에
 `192.168.1.206`, `192.168.1.207`, ... 순서로 `force_ip_address`를 채운다.
 
 ```bash
-ros2 launch flir_spinnaker_camera multicam.launch.py \
-  auto_update_cameras_file:=true \
-  auto_update_force_ip_base:=192.168.1.206
+rosrun flir_spinnaker_camera flir_multicam_inventory_tool \
+  --output src/flir_spinnaker_camera/config/multicam_cameras.yaml \
+  --force-ip-base 192.168.100.206 \
+  --force-ip-subnet-mask 255.255.255.0 \
+  --force-ip-gateway 0.0.0.0 \
+  --dry-run
 ```
 
 쓰기 없이 결과만 확인하려면 inventory tool을 직접 dry-run으로 실행한다.
 
 ```bash
-ros2 run flir_spinnaker_camera flir_multicam_inventory_tool \
+rosrun flir_spinnaker_camera flir_multicam_inventory_tool \
   --output src/flir_spinnaker_camera/config/multicam_cameras.yaml \
-  --force-ip-base 192.168.1.206 \
+  --force-ip-base 192.168.100.206 \
   --new-hardware-trigger-role none \
   --new-ptp-action-role receiver \
   --first-camera-ptp-sender \
@@ -155,9 +149,9 @@ ros2 run flir_spinnaker_camera flir_multicam_inventory_tool \
 
 ## GigE ForceIP
 
-카메라가 처음 연결될 때 `169.254.x.x` link-local 주소로 뜨면, 노드가 카메라
-`Init()` 전에 Spinnaker TLDevice `GevDeviceForceIP`를 실행해서 serial별 IP를
-임시 할당할 수 있다. 카메라가 Spinnaker 목록에 보이는 상태여야 한다.
+카메라가 다른 subnet이나 `169.254.x.x` link-local 주소로 뜨면, Noetic 노드가
+카메라 `Init()` 전에 Spinnaker ForceIP를 실행해서 serial별 IP를 임시 할당할 수
+있다. 카메라가 Spinnaker 목록에 보이는 상태여야 한다.
 
 멀티캠에서는 `config/multicam_cameras.yaml`에 카메라별 주소를 적는다.
 
@@ -166,20 +160,20 @@ ros2 run flir_spinnaker_camera flir_multicam_inventory_tool \
   serial: "25415248"
   namespace: "camera0"
   frame_id: "camera0_optical_frame"
-  force_ip_address: "192.168.1.206"
+  force_ip_address: "192.168.100.207"
   force_ip_subnet_mask: "255.255.255.0"
   force_ip_gateway: "0.0.0.0"
 ```
 
-기본값은 현재 IP가 `169.254.x.x`일 때만 ForceIP를 보낸다. 이미 원하는 IP면
-건너뛰고, 다른 정상 IP면 건드리지 않는다.
+`noetic_multicam.launch`는 위 `force_ip_address`가 있는 카메라에 대해 기본으로
+ForceIP를 먼저 적용한다. 이미 원하는 IP이고 wrong-subnet 상태가 아니면 건너뛴다.
 
 단일 카메라 테스트:
 
 ```bash
-ros2 launch flir_spinnaker_camera flir_camera.launch.py \
+roslaunch flir_spinnaker_camera noetic_flir_camera.launch \
   camera_serial:=25415248 \
-  force_ip_address:=192.168.1.206
+  force_ip_address:=192.168.100.206
 ```
 
 ## BFS GPIO HW trigger
@@ -204,13 +198,34 @@ ros2 launch flir_spinnaker_camera flir_camera.launch.py \
 멀티캠 launch는 slave 노드를 먼저 띄우고 master 노드는 기본 1초 늦게 시작한다.
 
 ```bash
-ros2 launch flir_spinnaker_camera multicam.launch.py
+roslaunch flir_spinnaker_camera noetic_multicam.launch
 ```
 
-필요하면 master 시작 지연만 조정할 수 있다.
+Noetic launch에서는 `hardware_trigger_master_start_delay` 인자를 쓰지 않는다.
 
 ```bash
-ros2 launch flir_spinnaker_camera multicam.launch.py hardware_trigger_master_start_delay:=2.0
+roslaunch flir_spinnaker_camera noetic_multicam.launch
+```
+
+## Runtime control
+
+Noetic 카메라 노드는 카메라 namespace마다 `set_camera_control` service를 제공한다.
+scope는 `camera`, `stream`, `tl_device` 중 하나이고, helper에서는 `camera.ExposureAuto`
+같은 prefix로 지정할 수 있다.
+
+```bash
+python3 scripts/multicam_param_set.py camera.ExposureAuto Off
+python3 scripts/multicam_param_set.py camera.ExposureTime 8000
+python3 scripts/multicam_param_set.py --camera camera1 camera.GainAuto Off
+python3 scripts/multicam_param_set.py stream.StreamBufferCountManual 64
+```
+
+직접 service를 호출할 수도 있다.
+
+```bash
+rosservice call /camera0/set_camera_control "scope: 'camera'
+name: 'GainAuto'
+value: 'Off'"
 ```
 
 ## PTP scheduled action trigger
@@ -222,19 +237,19 @@ HW trigger 케이블 없이 GigE 카메라들을 맞출 때는 PC NIC를 PTP gra
 예시:
 
 ```bash
-sudo ptp4l -i <camera_nic> -m
+sudo ptp4l -i enp3s0f1 -m -S
 ```
 
-`ptp4l`을 권한 문제 없이 실행할 수 있는 환경이면 launch에서 같이 띄울 수도 있다.
+다른 터미널에서 카메라 launch를 실행한다.
 
 ```bash
-ros2 launch flir_spinnaker_camera multicam.launch.py ptp_master_interface:=<camera_nic>
+roslaunch flir_spinnaker_camera noetic_multicam.launch
 ```
 
-현재 장비에서는 카메라 NIC가 `enp5s0`로 보이면 아래처럼 실행한다.
+현재 장비에서는 카메라 NIC가 `enp3s0f1`이다.
 
 ```bash
-ros2 launch flir_spinnaker_camera multicam.launch.py ptp_master_interface:=enp5s0
+sudo ptp4l -i enp3s0f1 -m -S
 ```
 
 `ptp4l` 명령이 없으면 `linuxptp` 패키지를 설치해야 한다.
@@ -285,20 +300,20 @@ scripts/setup_camera_nic.bash --interface enp5s0 --host-cidr 192.168.1.10/24
 ```
 
 공통 설정은 `config/flir_camera.yaml`의 `ptp.*`와 `ptp_action.*`에서 조정한다.
-기본값은 PTP status가 `Slave`가 될 때까지 기다린 뒤, sender가 카메라 timestamp를
-latch하고 100 ms 뒤의 PTP time으로 scheduled action command를 주기적으로 보낸다.
+Noetic launch의 기본값은 `ptp_action_enable:=true`다. PTP status가 `Slave`가 되면
+sender가 카메라 timestamp를 latch하고 100 ms 뒤의 PTP time으로 scheduled action
+command를 주기적으로 보낸다. 기본값은 `ptp_require_sync:=true`라서 `ptp4l`을 먼저
+띄우지 않으면 launch가 실패한다. Noetic launch에서 `ptp_action_rate_hz:=0.0`이면
+카메라의 resulting frame rate를 읽어서 가능한 rate를 자동으로 잡는다.
 
 ```bash
-ros2 launch flir_spinnaker_camera multicam.launch.py
+roslaunch flir_spinnaker_camera noetic_multicam.launch
 ```
 
-단일 카메라 테스트는 launch argument로도 켤 수 있다.
+단일 카메라는 Noetic 카메라 launch로 실행한다.
 
 ```bash
-ros2 launch flir_spinnaker_camera flir_camera.launch.py \
-  ptp_action_role:=sender \
-  ptp_action_rate_hz:=10.0 \
-  ptp_action_schedule_ahead_ms:=100.0
+roslaunch flir_spinnaker_camera noetic_flir_camera.launch camera_serial:=25415248
 ```
 
 ## Extrinsic TF
@@ -315,31 +330,28 @@ YAML의 `extrinsics_by_serial` 항목 중 `config/multicam_cameras.yaml` invento
 있는 serial만 publish한다.
 
 ```bash
-ros2 launch flir_spinnaker_camera multicam.launch.py
+roslaunch flir_spinnaker_camera noetic_multicam.launch
 ```
 
 필요하면 끄거나 다른 extrinsic YAML을 지정할 수 있다.
 
 ```bash
-ros2 launch flir_spinnaker_camera multicam.launch.py \
-  publish_extrinsics_tf:=false
+roslaunch flir_spinnaker_camera noetic_multicam.launch
 
-ros2 launch flir_spinnaker_camera multicam.launch.py \
+roslaunch flir_spinnaker_camera noetic_extrinsics_tf.launch \
   extrinsics_yaml_path:=calibration/flir_camera_extrinsics.yaml
 ```
 
-단일 카메라 launch에서는 기본으로 꺼져 있고, 필요할 때만 켠다.
+TF만 따로 띄울 때는 `noetic_extrinsics_tf.launch`를 쓴다.
 
 ```bash
-ros2 launch flir_spinnaker_camera flir_camera.launch.py \
-  camera_serial:=25415248 \
-  publish_extrinsics_tf:=true
+roslaunch flir_spinnaker_camera noetic_extrinsics_tf.launch
 ```
 
-모든 카메라에 같은 runtime parameter를 적용할 때는 repo root에서 helper를 쓸 수 있다.
+Noetic 노드는 runtime parameter helper를 쓰지 않는다.
 
 ```bash
-python3 scripts/multicam_param_set.py camera.ExposureAuto Off
+# 시작 시 적용할 camera control은 launch/config 쪽에 넣는다.
 ```
 
 ## 운영 메모

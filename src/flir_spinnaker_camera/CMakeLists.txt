@@ -56,6 +56,9 @@ if("$ENV{ROS_VERSION}" STREQUAL "1")
   add_message_files(FILES
     FlirMetadata.msg
   )
+  add_service_files(FILES
+    SetCameraControl.srv
+  )
 
   generate_messages(DEPENDENCIES
     std_msgs
@@ -76,15 +79,25 @@ if("$ENV{ROS_VERSION}" STREQUAL "1")
   add_executable(flir_camera_extrinsics_tf_noetic_node
     src/noetic/flir_camera_extrinsics_tf_noetic_node.cpp
   )
+  add_executable(flir_multicam_inventory_tool
+    src/flir_multicam_inventory_tool.cpp
+  )
 
   target_compile_features(flir_spinnaker_camera_noetic_node PUBLIC cxx_std_17)
   target_compile_features(flir_camera_extrinsics_tf_noetic_node PUBLIC cxx_std_17)
+  target_compile_features(flir_multicam_inventory_tool PUBLIC cxx_std_17)
   target_include_directories(flir_spinnaker_camera_noetic_node SYSTEM PRIVATE
+    ${SPINNAKER_INCLUDE_DIR}
+  )
+  target_include_directories(flir_multicam_inventory_tool SYSTEM PRIVATE
     ${SPINNAKER_INCLUDE_DIR}
   )
   target_include_directories(flir_spinnaker_camera_noetic_node PRIVATE
     ${catkin_INCLUDE_DIRS}
     ${OpenCV_INCLUDE_DIRS}
+  )
+  target_include_directories(flir_camera_extrinsics_tf_noetic_node PRIVATE
+    ${catkin_INCLUDE_DIRS}
   )
   add_dependencies(flir_spinnaker_camera_noetic_node
     ${${PROJECT_NAME}_EXPORTED_TARGETS}
@@ -103,7 +116,14 @@ if("$ENV{ROS_VERSION}" STREQUAL "1")
   target_link_libraries(flir_camera_extrinsics_tf_noetic_node
     ${catkin_LIBRARIES}
   )
+  target_link_libraries(flir_multicam_inventory_tool
+    ${SPINNAKER_LIBRARY}
+  )
   set_target_properties(flir_spinnaker_camera_noetic_node PROPERTIES
+    BUILD_RPATH ${SPINNAKER_LIBRARY_DIR}
+    INSTALL_RPATH ${SPINNAKER_LIBRARY_DIR}
+  )
+  set_target_properties(flir_multicam_inventory_tool PROPERTIES
     BUILD_RPATH ${SPINNAKER_LIBRARY_DIR}
     INSTALL_RPATH ${SPINNAKER_LIBRARY_DIR}
   )
@@ -111,7 +131,12 @@ if("$ENV{ROS_VERSION}" STREQUAL "1")
   install(TARGETS
     flir_spinnaker_camera_noetic_node
     flir_camera_extrinsics_tf_noetic_node
+    flir_multicam_inventory_tool
     RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+  )
+  install(PROGRAMS
+    scripts/ptp4l_roslaunch_wrapper.bash
+    DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
   )
   install(DIRECTORY launch config
     DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}

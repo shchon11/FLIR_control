@@ -29,14 +29,16 @@
 ## 실행
 
 ```bash
+export FLIR_ROS_DISTRO=noetic
 source scripts/setup_flir_env.bash
-ros2 launch flir_camera_undistort_viewer undistort_viewer.launch.py
+catkin build flir_camera_undistort_viewer
+roslaunch flir_camera_undistort_viewer noetic_undistort_viewer.launch
 ```
 
 토픽 override 예:
 
 ```bash
-ros2 launch flir_camera_undistort_viewer undistort_viewer.launch.py \
+roslaunch flir_camera_undistort_viewer noetic_undistort_viewer.launch \
   input_topic:=/image_rgb/compressed \
   camera_info_topic:=/camera_info \
   output_topic:=/image_rgb/undistorted/compressed
@@ -44,12 +46,20 @@ ros2 launch flir_camera_undistort_viewer undistort_viewer.launch.py \
 
 ## 멀티캠 실행
 
-`multicam_undistort_viewer.launch.py`는
-`flir_spinnaker_camera/config/multicam_cameras.yaml`의 camera inventory를 읽고
-카메라별 viewer 노드를 하나씩 실행한다.
+Noetic에서는 카메라별로 node 이름과 topic을 지정해서 viewer를 띄운다.
 
 ```bash
-ros2 launch flir_camera_undistort_viewer multicam_undistort_viewer.launch.py
+roslaunch flir_camera_undistort_viewer noetic_undistort_viewer.launch \
+  node_name:=camera0_undistort_viewer \
+  input_topic:=/camera0/image_rgb/compressed \
+  camera_info_topic:=/camera0/camera_info \
+  output_topic:=/camera0/image_rgb/undistorted/compressed
+
+roslaunch flir_camera_undistort_viewer noetic_undistort_viewer.launch \
+  node_name:=camera1_undistort_viewer \
+  input_topic:=/camera1/image_rgb/compressed \
+  camera_info_topic:=/camera1/camera_info \
+  output_topic:=/camera1/image_rgb/undistorted/compressed
 ```
 
 각 viewer는 namespace 내부의 relative topic을 사용한다.

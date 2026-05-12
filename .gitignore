@@ -1,6 +1,9 @@
 build/
+devel/
 install/
 log/
+logs/
+.catkin_tools/
 
 # ROS bag recordings and storage shards
 bag/
@@ -36,6 +39,7 @@ __pycache__/
 
 # Common generated files
 compile_commands.json
+.spinnaker-*/
 
 # Calibration artifacts
 calibration/captures/

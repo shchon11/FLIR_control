@@ -1,0 +1,38 @@
+<launch>
+  <arg name="params_file" default="$(find flir_camera_calibration)/config/calibration.yaml"/>
+  <arg name="cameras_file" default="$(find flir_spinnaker_camera)/config/multicam_cameras.yaml"/>
+  <arg name="camera_name" default="camera0"/>
+  <arg name="camera_serial" default=""/>
+  <arg name="input_topic" default="image_rgb/compressed"/>
+  <arg name="annotated_output_topic" default="calibration/image_annotated/compressed"/>
+  <arg name="output_yaml_path" default="calibration/flir_camera_info.yaml"/>
+  <arg name="sample_image_dir" default="calibration/captures"/>
+  <arg name="board_cols" default="6"/>
+  <arg name="board_rows" default="5"/>
+  <arg name="square_size_m" default="0.08"/>
+  <arg name="min_calibration_frames" default="15"/>
+  <arg name="display_window" default="true"/>
+  <arg name="preview_max_width" default="640"/>
+  <arg name="preview_fast_check" default="true"/>
+
+  <node pkg="flir_camera_calibration"
+        type="noetic_intrinsic_calibration_node.py"
+        name="flir_camera_calibration_$(arg camera_name)"
+        output="screen">
+    <param name="params_file" value="$(arg params_file)"/>
+    <param name="cameras_file" value="$(arg cameras_file)"/>
+    <param name="select_camera_name" value="$(arg camera_name)"/>
+    <param name="camera_serial" value="$(arg camera_serial)"/>
+    <param name="input_topic" value="$(arg input_topic)"/>
+    <param name="annotated_output_topic" value="$(arg annotated_output_topic)"/>
+    <param name="output_yaml_path" value="$(arg output_yaml_path)"/>
+    <param name="sample_image_dir" value="$(arg sample_image_dir)"/>
+    <param name="board_cols" type="int" value="$(arg board_cols)"/>
+    <param name="board_rows" type="int" value="$(arg board_rows)"/>
+    <param name="square_size_m" type="double" value="$(arg square_size_m)"/>
+    <param name="min_calibration_frames" type="int" value="$(arg min_calibration_frames)"/>
+    <param name="display_window" type="bool" value="$(arg display_window)"/>
+    <param name="preview_max_width" type="int" value="$(arg preview_max_width)"/>
+    <param name="preview_fast_check" type="bool" value="$(arg preview_fast_check)"/>
+  </node>
+</launch>

@@ -1,25 +1,65 @@
 <launch>
   <arg name="cameras_file" default="$(find flir_spinnaker_camera)/config/multicam_cameras.yaml" />
+  <arg name="camera_config_yaml_path" default="$(find flir_spinnaker_camera)/config/flir_camera.yaml" />
   <arg name="camera_info_yaml_path" default="$(env FLIR_ROS_WS)/calibration/flir_camera_info.yaml" />
   <arg name="pixel_format" default="BayerRG16" />
   <arg name="buffer_handling_mode" default="NewestOnly" />
-  <arg name="publish_raw" default="false" />
+  <arg name="publish_raw" default="" />
   <arg name="publish_rgb_compressed" default="true" />
   <arg name="rgb_jpeg_quality" default="80" />
+  <arg name="force_ip_enable" default="true" />
+  <arg name="force_ip_wait_after_ms" default="1500" />
+  <arg name="force_ip_rediscovery_timeout_ms" default="5000" />
+  <arg name="force_ip_max_attempts" default="3" />
+  <arg name="ptp_enable" default="false" />
+  <arg name="ptp_wait_for_sync" default="true" />
+  <arg name="ptp_require_sync" default="true" />
+  <arg name="ptp_sync_timeout_ms" default="10000" />
+  <arg name="ptp_action_enable" default="true" />
+  <arg name="ptp_action_rate_hz" default="0.0" />
+  <arg name="ptp_action_schedule_ahead_ms" default="100.0" />
+  <arg name="ptp_action_request_ack" default="false" />
+  <arg name="ptp_action_expected_ack_count" default="0" />
+  <arg name="ptp_master_interface" default="" />
+  <arg name="ptp4l_binary" default="ptp4l" />
+  <arg name="ptp4l_timestamping" default="software" />
+  <arg name="ptp4l_uds_address" default="/tmp/ptp4l-flir" />
   <arg name="publish_extrinsics_tf" default="true" />
   <arg name="extrinsics_yaml_path" default="$(env FLIR_ROS_WS)/calibration/flir_camera_extrinsics.yaml" />
 
+  <node if="$(eval arg('ptp_master_interface') != '')"
+        pkg="flir_spinnaker_camera"
+        type="ptp4l_roslaunch_wrapper.bash"
+        name="flir_ptp4l"
+        output="screen"
+        required="true"
+        args="--binary $(arg ptp4l_binary) --interface $(arg ptp_master_interface) --timestamping $(arg ptp4l_timestamping) --uds-address $(arg ptp4l_uds_address)" />
+
   <node pkg="flir_spinnaker_camera" type="flir_spinnaker_camera_noetic_node" name="flir_multicam" output="screen">
     <param name="cameras_file" value="$(arg cameras_file)" />
+    <param name="camera_config_yaml_path" value="$(arg camera_config_yaml_path)" />
     <param name="camera_info_yaml_path" value="$(arg camera_info_yaml_path)" />
     <param name="pixel_format" value="$(arg pixel_format)" />
     <param name="buffer_handling_mode" value="$(arg buffer_handling_mode)" />
-    <param name="publish_raw" value="$(arg publish_raw)" />
+    <param if="$(eval arg('publish_raw') != '')" name="publish_raw" value="$(arg publish_raw)" type="bool" />
     <param name="publish_camera_info" value="true" />
     <param name="publish_metadata" value="true" />
     <param name="publish_rgb_compressed" value="$(arg publish_rgb_compressed)" />
     <param name="rgb_compression_format" value="jpeg" />
     <param name="rgb_jpeg_quality" value="$(arg rgb_jpeg_quality)" />
+    <param name="force_ip_enable" value="$(arg force_ip_enable)" />
+    <param name="force_ip_wait_after_ms" value="$(arg force_ip_wait_after_ms)" />
+    <param name="force_ip_rediscovery_timeout_ms" value="$(arg force_ip_rediscovery_timeout_ms)" />
+    <param name="force_ip_max_attempts" value="$(arg force_ip_max_attempts)" />
+    <param name="ptp_enable" value="$(arg ptp_enable)" />
+    <param name="ptp_wait_for_sync" value="$(arg ptp_wait_for_sync)" />
+    <param name="ptp_require_sync" value="$(arg ptp_require_sync)" />
+    <param name="ptp_sync_timeout_ms" value="$(arg ptp_sync_timeout_ms)" />
+    <param name="ptp_action_enable" value="$(arg ptp_action_enable)" />
+    <param name="ptp_action_rate_hz" value="$(arg ptp_action_rate_hz)" />
+    <param name="ptp_action_schedule_ahead_ms" value="$(arg ptp_action_schedule_ahead_ms)" />
+    <param name="ptp_action_request_ack" value="$(arg ptp_action_request_ack)" />
+    <param name="ptp_action_expected_ack_count" value="$(arg ptp_action_expected_ack_count)" />
   </node>
 
   <include if="$(arg publish_extrinsics_tf)" file="$(find flir_spinnaker_camera)/launch/noetic_extrinsics_tf.launch">

@@ -1,0 +1,8 @@
+string scope
+string name
+string value
+---
+bool success
+string message
+string applied_type
+string current_value

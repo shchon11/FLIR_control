@@ -37,25 +37,35 @@
 ## 실행
 
 ```bash
+export FLIR_ROS_DISTRO=noetic
 source scripts/setup_flir_env.bash
-ros2 launch flir_camera_calibration calibration.launch.py
+catkin build flir_camera_calibration
+roslaunch flir_camera_calibration noetic_calibration.launch \
+  input_topic:=/image_rgb/compressed \
+  camera_serial:=25415255 \
+  camera_name:=flir_camera \
+  frame_id:=flir_camera_optical_frame
 ```
 
 체스보드 크기 override 예:
 
 ```bash
-ros2 launch flir_camera_calibration calibration.launch.py \
-  board_cols:=9 \
-  board_rows:=6 \
-  square_size_m:=0.024
+roslaunch flir_camera_calibration noetic_calibration.launch \
+  input_topic:=/camera0/image_rgb/compressed \
+  camera_serial:=25415248 \
+  camera_name:=camera0 \
+  frame_id:=camera0_optical_frame \
+  board_cols:=6 \
+  board_rows:=5 \
+  square_size_m:=0.08
 ```
 
 ## 결과 활용
 
-저장된 `calibration/flir_camera_info.yaml`은 `flir_spinnaker_camera`의 `camera_info.yaml_path`에 바로 연결할 수 있다.
+저장된 `calibration/flir_camera_info.yaml`은 `flir_spinnaker_camera`의 `camera_info_yaml_path` launch 인자로 연결할 수 있다.
 
 ```bash
-ros2 launch flir_spinnaker_camera flir_camera.launch.py \
+roslaunch flir_spinnaker_camera noetic_flir_camera.launch \
   camera_info_yaml_path:=calibration/flir_camera_info.yaml
 ```
 
@@ -65,7 +75,9 @@ ros2 launch flir_spinnaker_camera flir_camera.launch.py \
 `camera0`, `camera1` inventory를 기준으로 대상 카메라를 고른다.
 
 ```bash
-ros2 launch flir_camera_calibration multicam_calibration.launch.py camera_name:=camera0
+roslaunch flir_camera_calibration noetic_multicam_calibration.launch camera_name:=camera0
+roslaunch flir_camera_calibration noetic_multicam_calibration.launch camera_name:=camera1
+roslaunch flir_camera_calibration noetic_multicam_calibration.launch camera_name:=camera2
 ```
 
 저장 결과는 `calibration/flir_camera_info.yaml`의 `camera_info_by_serial` 아래에
@@ -77,7 +89,7 @@ ros2 launch flir_camera_calibration multicam_calibration.launch.py camera_name:=
 여러 카메라가 같은 체커보드를 overlap region에서 볼 수 있게 둔 뒤 실행한다.
 
 ```bash
-ros2 launch flir_camera_calibration multicam_extrinsic_calibration.launch.py
+roslaunch flir_camera_calibration noetic_multicam_extrinsic_calibration.launch
 ```
 
 노드는 각 `/cameraN/image_rgb/compressed`와 `/cameraN/camera_info`를 구독한다.
@@ -98,6 +110,12 @@ ros2 launch flir_camera_calibration multicam_extrinsic_calibration.launch.py
 graph path의 가장 약한 edge observation 수가 `min_observations`보다 적으면 저장을
 거부한다. 모든 카메라가 동시에 보드를 볼 때만 캡처하려면
 `require_all_cameras_for_capture:=true`를 넘긴다.
+
+저장된 `calibration/flir_camera_extrinsics.yaml`을 TF로 publish하려면:
+
+```bash
+roslaunch flir_spinnaker_camera noetic_extrinsics_tf.launch
+```
 
 ## 메모
 

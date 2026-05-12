@@ -69,7 +69,7 @@ flir_camera:
     #   camera->PC 링크 대역폭은 줄이지 않습니다.
     # - JPEG: lossy, 보통 훨씬 작고 빠름
     # - PNG : lossless, 보통 더 크고 CPU 사용량이 큼
-    publish_raw: false
+    publish_raw: true
     publish_camera_info: true
     publish_metadata: true
     publish_rgb_compressed: true
@@ -254,9 +254,10 @@ flir_camera:
     # HW trigger 없이 여러 GigE 카메라를 맞출 때 사용합니다.
     # PC에서는 별도로 linuxptp/ptp4l 을 해당 NIC에서 grandmaster로 실행하고,
     # 카메라 노드는 아래 PTP 설정으로 camera clock을 slave 동기화합니다.
-    ptp.enable: false
+    ptp.enable: true
     ptp.mode: "SlaveOnly"
     ptp.wait_for_sync: true
+    # Keep true for synchronized capture: start ptp4l before launching.
     ptp.require_sync: true
     ptp.sync_timeout_ms: 10000
     ptp.sync_poll_ms: 250
@@ -275,7 +276,7 @@ flir_camera:
     ptp_action.device_key: 1
     ptp_action.group_key: 1
     ptp_action.group_mask: 4294967295
-    ptp_action.rate_hz: 5.0
+    ptp_action.rate_hz: 10.0
     # sender가 카메라 timestamp를 latch한 뒤 이만큼 미래의 PTP time으로 action을 예약합니다.
     ptp_action.schedule_ahead_ms: 100.0
     ptp_action.start_delay_ms: 1000.0
@@ -286,8 +287,17 @@ flir_camera:
     # --------------------------------------------------------------------------
     # Camera-side bandwidth limiting
     # --------------------------------------------------------------------------
-    # Limits the maximum bandwidth streamed by the camera.
-    camera.DeviceLinkThroughputLimit: 30000000
+    # Limits the maximum bandwidth streamed by each camera in bytes/sec.
+    # 110 MB/s keeps some headroom below a 1 GbE camera link while allowing
+    # three cameras to aggregate comfortably over the 10 GbE PC uplink.
+    camera.DeviceLinkThroughputLimit: 110000000
+    # Keep this below the PC NIC MTU 1500 unless every camera/switch/NIC port is
+    # configured for jumbo frames. Mixed 1400/9000 camera packet sizes cause
+    # IMAGE_MISSING_PACKETS on the non-matching stream.
+    camera.GevSCPSPacketSize: 1400
+    # Keep packet pacing deterministic across cameras. Some cameras retain a
+    # large delay after being switched back from jumbo packets unless forced.
+    camera.GevSCPD: 1536
     # Bandwidth reserve for link robustness / resends.
     # camera.DeviceLinkBandwidthReserve: 0
 

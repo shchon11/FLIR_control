@@ -1,0 +1,40 @@
+<launch>
+  <arg name="params_file" default="$(find flir_camera_calibration)/config/extrinsic_calibration.yaml"/>
+  <arg name="cameras_file" default="$(find flir_spinnaker_camera)/config/multicam_cameras.yaml"/>
+  <arg name="output_yaml_path" default="calibration/flir_camera_extrinsics.yaml"/>
+  <arg name="reference_camera" default="camera0"/>
+  <arg name="reference_frame" default="flir_rig_frame"/>
+  <arg name="image_topic" default="image_rgb/compressed"/>
+  <arg name="camera_info_topic" default="camera_info"/>
+  <arg name="board_cols" default="6"/>
+  <arg name="board_rows" default="5"/>
+  <arg name="square_size_m" default="0.08"/>
+  <arg name="min_observations" default="5"/>
+  <arg name="max_frame_age_ms" default="500"/>
+  <arg name="require_all_cameras_for_capture" default="false"/>
+  <arg name="display_window" default="true"/>
+  <arg name="preview_max_width" default="640"/>
+  <arg name="preview_fast_check" default="true"/>
+
+  <node pkg="flir_camera_calibration"
+        type="noetic_extrinsic_calibration_node.py"
+        name="flir_camera_extrinsic_calibration"
+        output="screen">
+    <param name="params_file" value="$(arg params_file)"/>
+    <param name="cameras_file" value="$(arg cameras_file)"/>
+    <param name="output_yaml_path" value="$(arg output_yaml_path)"/>
+    <param name="reference_camera" value="$(arg reference_camera)"/>
+    <param name="reference_frame" value="$(arg reference_frame)"/>
+    <param name="image_topic" value="$(arg image_topic)"/>
+    <param name="camera_info_topic" value="$(arg camera_info_topic)"/>
+    <param name="board_cols" type="int" value="$(arg board_cols)"/>
+    <param name="board_rows" type="int" value="$(arg board_rows)"/>
+    <param name="square_size_m" type="double" value="$(arg square_size_m)"/>
+    <param name="min_observations" type="int" value="$(arg min_observations)"/>
+    <param name="max_frame_age_ms" type="int" value="$(arg max_frame_age_ms)"/>
+    <param name="require_all_cameras_for_capture" type="bool" value="$(arg require_all_cameras_for_capture)"/>
+    <param name="display_window" type="bool" value="$(arg display_window)"/>
+    <param name="preview_max_width" type="int" value="$(arg preview_max_width)"/>
+    <param name="preview_fast_check" type="bool" value="$(arg preview_fast_check)"/>
+  </node>
+</launch>

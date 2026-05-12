@@ -734,7 +734,7 @@ def make_handler(dataset: Path, version: str):
                 self.send_json()
                 return
             if parsed.path.startswith("/data/"):
-                self.send_file(parsed.path.removeprefix("/data/"))
+                self.send_file(parsed.path[len("/data/"):])
                 return
             self.send_error(404, "Not found")
 
