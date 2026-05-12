@@ -1,0 +1,12 @@
+<launch>
+  <arg name="input_topic" default="/image_rgb/compressed" />
+  <arg name="camera_info_topic" default="/camera_info" />
+  <arg name="output_topic" default="/image_rgb/undistorted/compressed" />
+
+  <node pkg="flir_camera_undistort_viewer" type="flir_camera_undistort_viewer_noetic_node" name="flir_camera_undistort_viewer" output="screen">
+    <param name="input_topic" value="$(arg input_topic)" />
+    <param name="camera_info_topic" value="$(arg camera_info_topic)" />
+    <param name="output_topic" value="$(arg output_topic)" />
+    <param name="output_jpeg_quality" value="80" />
+  </node>
+</launch>

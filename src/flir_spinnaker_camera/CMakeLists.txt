@@ -5,21 +5,6 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
-find_package(ament_cmake REQUIRED)
-find_package(geometry_msgs REQUIRED)
-find_package(OpenCV REQUIRED COMPONENTS imgcodecs imgproc)
-find_package(rclcpp REQUIRED)
-find_package(rosidl_default_generators REQUIRED)
-find_package(sensor_msgs REQUIRED)
-find_package(std_msgs REQUIRED)
-find_package(tf2_ros REQUIRED)
-find_package(Threads REQUIRED)
-
-rosidl_generate_interfaces(${PROJECT_NAME}
-  "msg/FlirMetadata.msg"
-  DEPENDENCIES std_msgs
-)
-
 set(SPINNAKER_ROOT "$ENV{SPINNAKER_ROOT}" CACHE PATH "Spinnaker SDK root directory")
 
 set(_spinnaker_include_hints)
@@ -55,6 +40,102 @@ if(NOT SPINNAKER_INCLUDE_DIR OR NOT SPINNAKER_LIBRARY)
 endif()
 
 get_filename_component(SPINNAKER_LIBRARY_DIR ${SPINNAKER_LIBRARY} DIRECTORY)
+
+if("$ENV{ROS_VERSION}" STREQUAL "1")
+  find_package(catkin REQUIRED COMPONENTS
+    geometry_msgs
+    message_generation
+    roscpp
+    sensor_msgs
+    std_msgs
+    tf2_ros
+  )
+  find_package(OpenCV REQUIRED COMPONENTS imgcodecs imgproc)
+  find_package(Threads REQUIRED)
+
+  add_message_files(FILES
+    FlirMetadata.msg
+  )
+
+  generate_messages(DEPENDENCIES
+    std_msgs
+  )
+
+  catkin_package(CATKIN_DEPENDS
+    geometry_msgs
+    message_runtime
+    roscpp
+    sensor_msgs
+    std_msgs
+    tf2_ros
+  )
+
+  add_executable(flir_spinnaker_camera_noetic_node
+    src/noetic/flir_spinnaker_camera_noetic_node.cpp
+  )
+  add_executable(flir_camera_extrinsics_tf_noetic_node
+    src/noetic/flir_camera_extrinsics_tf_noetic_node.cpp
+  )
+
+  target_compile_features(flir_spinnaker_camera_noetic_node PUBLIC cxx_std_17)
+  target_compile_features(flir_camera_extrinsics_tf_noetic_node PUBLIC cxx_std_17)
+  target_include_directories(flir_spinnaker_camera_noetic_node SYSTEM PRIVATE
+    ${SPINNAKER_INCLUDE_DIR}
+  )
+  target_include_directories(flir_spinnaker_camera_noetic_node PRIVATE
+    ${catkin_INCLUDE_DIRS}
+    ${OpenCV_INCLUDE_DIRS}
+  )
+  add_dependencies(flir_spinnaker_camera_noetic_node
+    ${${PROJECT_NAME}_EXPORTED_TARGETS}
+    ${catkin_EXPORTED_TARGETS}
+  )
+  add_dependencies(flir_camera_extrinsics_tf_noetic_node
+    ${${PROJECT_NAME}_EXPORTED_TARGETS}
+    ${catkin_EXPORTED_TARGETS}
+  )
+  target_link_libraries(flir_spinnaker_camera_noetic_node
+    ${catkin_LIBRARIES}
+    ${OpenCV_LIBS}
+    ${SPINNAKER_LIBRARY}
+    Threads::Threads
+  )
+  target_link_libraries(flir_camera_extrinsics_tf_noetic_node
+    ${catkin_LIBRARIES}
+  )
+  set_target_properties(flir_spinnaker_camera_noetic_node PROPERTIES
+    BUILD_RPATH ${SPINNAKER_LIBRARY_DIR}
+    INSTALL_RPATH ${SPINNAKER_LIBRARY_DIR}
+  )
+
+  install(TARGETS
+    flir_spinnaker_camera_noetic_node
+    flir_camera_extrinsics_tf_noetic_node
+    RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+  )
+  install(DIRECTORY launch config
+    DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
+  )
+  install(FILES README.md
+    DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
+  )
+  return()
+endif()
+
+find_package(ament_cmake REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(OpenCV REQUIRED COMPONENTS imgcodecs imgproc)
+find_package(rclcpp REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(Threads REQUIRED)
+
+rosidl_generate_interfaces(${PROJECT_NAME}
+  "msg/FlirMetadata.msg"
+  DEPENDENCIES std_msgs
+)
 
 add_executable(flir_spinnaker_camera_node
   src/flir_spinnaker_camera_node.cpp

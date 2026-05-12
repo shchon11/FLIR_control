@@ -67,6 +67,16 @@ source scripts/setup_flir_env.bash
 ros2 launch flir_spinnaker_camera flir_camera.launch.py
 ```
 
+ROS 1 Noetic에서는 catkin 빌드 후 Noetic launch 파일을 쓴다.
+
+```bash
+export FLIR_ROS_DISTRO=noetic
+source scripts/setup_flir_env.bash
+catkin_make
+source devel/setup.bash
+roslaunch flir_spinnaker_camera noetic_flir_camera.launch
+```
+
 시리얼 지정 예:
 
 ```bash
@@ -87,6 +97,19 @@ ros2 launch flir_spinnaker_camera flir_camera.launch.py \
 
 ```bash
 ros2 launch flir_spinnaker_camera multicam.launch.py
+```
+
+Noetic 멀티캠은 `config/multicam_cameras.yaml`을 같은 방식으로 읽어서
+한 ROS 1 노드 안에서 camera namespace별 publisher를 만든다.
+
+```bash
+roslaunch flir_spinnaker_camera noetic_multicam.launch
+```
+
+Noetic에서 extrinsic TF만 따로 띄울 수도 있다.
+
+```bash
+roslaunch flir_spinnaker_camera noetic_extrinsics_tf.launch
 ```
 
 예시 토픽:

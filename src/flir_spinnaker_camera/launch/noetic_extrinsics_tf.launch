@@ -1,0 +1,9 @@
+<launch>
+  <arg name="extrinsics_yaml_path" default="$(env FLIR_ROS_WS)/calibration/flir_camera_extrinsics.yaml" />
+  <arg name="frame_prefix" default="" />
+
+  <node pkg="flir_spinnaker_camera" type="flir_camera_extrinsics_tf_noetic_node" name="flir_camera_extrinsics_tf" output="screen">
+    <param name="extrinsics_yaml_path" value="$(arg extrinsics_yaml_path)" />
+    <param name="frame_prefix" value="$(arg frame_prefix)" />
+  </node>
+</launch>

@@ -5,6 +5,27 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
+if("$ENV{ROS_VERSION}" STREQUAL "1")
+  find_package(catkin REQUIRED COMPONENTS
+    roscpp
+    sensor_msgs
+  )
+  find_package(OpenCV REQUIRED COMPONENTS calib3d highgui imgcodecs imgproc)
+
+  catkin_package(CATKIN_DEPENDS
+    roscpp
+    sensor_msgs
+  )
+
+  install(DIRECTORY launch config
+    DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
+  )
+  install(FILES README.md
+    DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
+  )
+  return()
+endif()
+
 find_package(ament_cmake REQUIRED)
 find_package(OpenCV REQUIRED COMPONENTS calib3d highgui imgcodecs imgproc)
 find_package(rclcpp REQUIRED)

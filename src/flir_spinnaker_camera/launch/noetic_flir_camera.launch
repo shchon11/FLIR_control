@@ -1,0 +1,26 @@
+<launch>
+  <arg name="camera_serial" default="" />
+  <arg name="camera_index" default="0" />
+  <arg name="frame_id" default="flir_camera_optical_frame" />
+  <arg name="camera_info_yaml_path" default="$(env FLIR_ROS_WS)/calibration/flir_camera_info.yaml" />
+  <arg name="pixel_format" default="BayerRG16" />
+  <arg name="buffer_handling_mode" default="NewestOnly" />
+  <arg name="publish_raw" default="false" />
+  <arg name="publish_rgb_compressed" default="true" />
+  <arg name="rgb_jpeg_quality" default="80" />
+
+  <node pkg="flir_spinnaker_camera" type="flir_spinnaker_camera_noetic_node" name="flir_camera" output="screen">
+    <param name="camera_serial" value="$(arg camera_serial)" />
+    <param name="camera_index" value="$(arg camera_index)" />
+    <param name="frame_id" value="$(arg frame_id)" />
+    <param name="camera_info_yaml_path" value="$(arg camera_info_yaml_path)" />
+    <param name="pixel_format" value="$(arg pixel_format)" />
+    <param name="buffer_handling_mode" value="$(arg buffer_handling_mode)" />
+    <param name="publish_raw" value="$(arg publish_raw)" />
+    <param name="publish_camera_info" value="true" />
+    <param name="publish_metadata" value="true" />
+    <param name="publish_rgb_compressed" value="$(arg publish_rgb_compressed)" />
+    <param name="rgb_compression_format" value="jpeg" />
+    <param name="rgb_jpeg_quality" value="$(arg rgb_jpeg_quality)" />
+  </node>
+</launch>
