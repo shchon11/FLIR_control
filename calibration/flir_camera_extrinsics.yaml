@@ -8,26 +8,47 @@ extrinsics_by_serial:
     translation_xyz_m: [0.0000000000, 0.0000000000, 0.0000000000]
     rotation_xyzw: [0.0000000000, 0.0000000000, 0.0000000000, 1.0000000000]
     calibration:
-      method: "multi_camera_chessboard"
+      method: "pairwise_graph_chessboard"
       reference_camera: "camera0"
-      generated_at_utc: "2026-05-09T10:05:59Z"
+      graph_path: "camera0"
+      generated_at_utc: "2026-05-12T07:36:26Z"
       board_cols: 6
       board_rows: 5
       square_size_m: 0.0800000000
-      observations: 11
+      observations: 17
+      path_min_edge_observations: 0
       mean_pair_reprojection_error: 0.0000000000
   "25415255":
     camera_name: "camera1"
     parent_frame: "flir_rig_frame"
     child_frame: "camera1_optical_frame"
-    translation_xyz_m: [-0.2765863091, -0.0134877189, 0.0019674369]
-    rotation_xyzw: [0.0488319827, -0.2853704136, 0.0256065088, 0.9568299071]
+    translation_xyz_m: [-0.7576727613, -0.6976208801, 0.1904686779]
+    rotation_xyzw: [0.0102775795, 0.2423771661, -0.0120045233, 0.9700533862]
     calibration:
-      method: "multi_camera_chessboard"
+      method: "pairwise_graph_chessboard"
       reference_camera: "camera0"
-      generated_at_utc: "2026-05-09T10:05:59Z"
+      graph_path: "camera0 -> camera1"
+      generated_at_utc: "2026-05-12T07:36:26Z"
       board_cols: 6
       board_rows: 5
       square_size_m: 0.0800000000
-      observations: 11
-      mean_pair_reprojection_error: 0.8796025383
+      observations: 17
+      path_min_edge_observations: 13
+      mean_pair_reprojection_error: 0.3063149451
+  "25415251":
+    camera_name: "camera2"
+    parent_frame: "flir_rig_frame"
+    child_frame: "camera2_optical_frame"
+    translation_xyz_m: [-0.8998892865, -0.0137696810, 0.8003062867]
+    rotation_xyzw: [-0.0031924992, 0.6166393702, 0.0165914991, 0.7870644302]
+    calibration:
+      method: "pairwise_graph_chessboard"
+      reference_camera: "camera0"
+      graph_path: "camera0 -> camera2"
+      generated_at_utc: "2026-05-12T07:36:26Z"
+      board_cols: 6
+      board_rows: 5
+      square_size_m: 0.0800000000
+      observations: 17
+      path_min_edge_observations: 9
+      mean_pair_reprojection_error: 0.4514339134

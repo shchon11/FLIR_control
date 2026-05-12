@@ -16,6 +16,9 @@ flir_camera_extrinsic_calibration:
     square_size_m: 0.08
     min_observations: 5
     max_frame_age_ms: 500
+    # false: capture whichever >=2 cameras currently see the board and solve a pairwise graph.
+    # true : require every configured camera to see the board for each observation.
+    require_all_cameras_for_capture: false
 
     display_window: true
     window_name: "FLIR Extrinsic Calibration"

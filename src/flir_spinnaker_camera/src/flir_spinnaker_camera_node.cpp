@@ -48,6 +48,7 @@ using Spinnaker::ImagePtr;
 using Spinnaker::PixelFormatEnums;
 using Spinnaker::SystemPtr;
 using Spinnaker::GenApi::CBooleanPtr;
+using Spinnaker::GenApi::CCommandPtr;
 using Spinnaker::GenApi::CEnumEntryPtr;
 using Spinnaker::GenApi::CEnumerationPtr;
 using Spinnaker::GenApi::CFloatPtr;
@@ -245,6 +246,17 @@ bool SetEnumerationByName(INodeMap & node_map, const char * node_name, const std
   return true;
 }
 
+bool SetBooleanByName(INodeMap & node_map, const char * node_name, bool value)
+{
+  CBooleanPtr bool_node = node_map.GetNode(node_name);
+  if (!IsWritable(bool_node)) {
+    return false;
+  }
+
+  bool_node->SetValue(value, true);
+  return true;
+}
+
 bool EnumerationContains(INodeMap & node_map, const char * node_name, const std::string & entry_name)
 {
   CEnumerationPtr enum_node = node_map.GetNode(node_name);
@@ -309,6 +321,134 @@ std::string NormalizePixelFormatParameter(std::string value)
   }
 
   return value;
+}
+
+std::string NormalizeHardwareTriggerRole(const std::string & value)
+{
+  const std::string normalized = NormalizeName(value);
+  if (normalized.empty() || normalized == "none" || normalized == "off" ||
+    normalized == "disabled" || normalized == "disable")
+  {
+    return "none";
+  }
+
+  if (normalized == "master" || normalized == "bfsmaster") {
+    return "master";
+  }
+
+  if (normalized == "slave" || normalized == "bfsslave") {
+    return "slave";
+  }
+
+  throw std::runtime_error(
+          "hardware_trigger.role must be one of none, master, or slave; got '" + value + "'.");
+}
+
+std::string NormalizePtpActionRole(const std::string & value)
+{
+  const std::string normalized = NormalizeName(value);
+  if (normalized.empty() || normalized == "none" || normalized == "off" ||
+    normalized == "disabled" || normalized == "disable")
+  {
+    return "none";
+  }
+
+  if (normalized == "receiver" || normalized == "receive" || normalized == "slave") {
+    return "receiver";
+  }
+
+  if (normalized == "sender" || normalized == "send" || normalized == "master") {
+    return "sender";
+  }
+
+  throw std::runtime_error(
+          "ptp_action.role must be one of none, receiver, or sender; got '" + value + "'.");
+}
+
+std::uint32_t ValidateUint32Parameter(std::int64_t value, const char * parameter_name)
+{
+  if (value < 0 || value > static_cast<std::int64_t>(std::numeric_limits<std::uint32_t>::max())) {
+    throw std::runtime_error(
+            std::string(parameter_name) + " must be between 0 and 4294967295.");
+  }
+
+  return static_cast<std::uint32_t>(value);
+}
+
+const char * ActionCommandStatusName(Spinnaker::ActionCommandStatus status)
+{
+  switch (status) {
+    case Spinnaker::SPINNAKER_ACTION_COMMAND_STATUS_OK:
+      return "OK";
+    case Spinnaker::SPINNAKER_ACTION_COMMAND_STATUS_NO_REF_TIME:
+      return "NO_REF_TIME";
+    case Spinnaker::SPINNAKER_ACTION_COMMAND_STATUS_OVERFLOW:
+      return "OVERFLOW";
+    case Spinnaker::SPINNAKER_ACTION_COMMAND_STATUS_ACTION_LATE:
+      return "ACTION_LATE";
+    case Spinnaker::SPINNAKER_ACTION_COMMAND_STATUS_ERROR:
+      return "ERROR";
+  }
+
+  return "UNKNOWN";
+}
+
+std::uint32_t ParseIpv4Address(std::string value, const char * parameter_name)
+{
+  value = TrimAscii(value);
+  if (value.empty()) {
+    throw std::runtime_error(std::string(parameter_name) + " must not be empty.");
+  }
+
+  std::array<unsigned long, 4> octets{};
+  std::stringstream stream(value);
+  std::string token;
+  for (std::size_t index = 0; index < octets.size(); ++index) {
+    if (!std::getline(stream, token, '.')) {
+      throw std::runtime_error(
+              std::string(parameter_name) + " must be an IPv4 address; got '" + value + "'.");
+    }
+
+    token = TrimAscii(token);
+    if (token.empty()) {
+      throw std::runtime_error(
+              std::string(parameter_name) + " contains an empty IPv4 octet.");
+    }
+
+    std::size_t consumed = 0U;
+    const unsigned long octet = std::stoul(token, &consumed);
+    if (consumed != token.size() || octet > 255UL) {
+      throw std::runtime_error(
+              std::string(parameter_name) + " contains invalid IPv4 octet '" + token + "'.");
+    }
+
+    octets[index] = octet;
+  }
+
+  if (std::getline(stream, token, '.')) {
+    throw std::runtime_error(
+            std::string(parameter_name) + " must contain exactly four IPv4 octets; got '" + value + "'.");
+  }
+
+  return (static_cast<std::uint32_t>(octets[0]) << 24U) |
+         (static_cast<std::uint32_t>(octets[1]) << 16U) |
+         (static_cast<std::uint32_t>(octets[2]) << 8U) |
+         static_cast<std::uint32_t>(octets[3]);
+}
+
+std::string FormatIpv4Address(std::uint32_t value)
+{
+  std::ostringstream stream;
+  stream << ((value >> 24U) & 0xffU) << "."
+         << ((value >> 16U) & 0xffU) << "."
+         << ((value >> 8U) & 0xffU) << "."
+         << (value & 0xffU);
+  return stream.str();
+}
+
+bool IsLinkLocalIpv4(std::uint32_t value)
+{
+  return ((value >> 24U) & 0xffU) == 169U && ((value >> 16U) & 0xffU) == 254U;
 }
 
 std::vector<std::string> PixelFormatParameterCandidates(const std::string & value)
@@ -507,6 +647,78 @@ public:
     auto_pixel_format_(declare_parameter<bool>("auto_pixel_format", true)),
     pixel_format_(declare_parameter<std::string>("pixel_format", "")),
     buffer_handling_mode_(declare_parameter<std::string>("buffer_handling_mode", "OldestFirst")),
+    hardware_trigger_role_(NormalizeHardwareTriggerRole(
+        declare_parameter<std::string>("hardware_trigger.role", "none"))),
+    hardware_trigger_master_output_line_(declare_parameter<std::string>(
+        "hardware_trigger.master.output_line", "Line1")),
+    hardware_trigger_master_line_source_(declare_parameter<std::string>(
+        "hardware_trigger.master.line_source", "ExposureActive")),
+    hardware_trigger_master_line_source_fallbacks_(declare_parameter<std::vector<std::string>>(
+        "hardware_trigger.master.line_source_fallbacks",
+        std::vector<std::string>{"FrameTriggerWait", "UserOutput0"})),
+    hardware_trigger_master_enable_3v3_(declare_parameter<bool>(
+        "hardware_trigger.master.enable_3v3", true)),
+    hardware_trigger_master_require_3v3_(declare_parameter<bool>(
+        "hardware_trigger.master.require_3v3", true)),
+    hardware_trigger_master_3v3_line_(declare_parameter<std::string>(
+        "hardware_trigger.master.line_3v3", "Line2")),
+    hardware_trigger_master_3v3_enable_nodes_(declare_parameter<std::vector<std::string>>(
+        "hardware_trigger.master.line_3v3_enable_nodes",
+        std::vector<std::string>{"V3_3Enable", "Line3V3Enable", "LineVoltageEnable"})),
+    hardware_trigger_slave_trigger_source_(declare_parameter<std::string>(
+        "hardware_trigger.slave.trigger_source", "Line3")),
+    hardware_trigger_slave_trigger_activation_(declare_parameter<std::string>(
+        "hardware_trigger.slave.trigger_activation", "RisingEdge")),
+    hardware_trigger_slave_trigger_overlap_(declare_parameter<std::string>(
+        "hardware_trigger.slave.trigger_overlap", "ReadOut")),
+    network_force_ip_enable_(declare_parameter<bool>("network.force_ip.enable", false)),
+    network_force_ip_address_(declare_parameter<std::string>("network.force_ip.address", "")),
+    network_force_ip_subnet_mask_(declare_parameter<std::string>(
+        "network.force_ip.subnet_mask", "255.255.255.0")),
+    network_force_ip_gateway_(declare_parameter<std::string>(
+        "network.force_ip.gateway", "0.0.0.0")),
+    network_force_ip_only_if_link_local_(declare_parameter<bool>(
+        "network.force_ip.only_if_link_local", true)),
+    network_force_ip_wait_after_ms_(declare_parameter<int>(
+        "network.force_ip.wait_after_ms", 1500)),
+    network_force_ip_rediscovery_timeout_ms_(declare_parameter<int>(
+        "network.force_ip.rediscovery_timeout_ms", 5000)),
+    ptp_enabled_(declare_parameter<bool>("ptp.enable", false)),
+    ptp_mode_(declare_parameter<std::string>("ptp.mode", "SlaveOnly")),
+    ptp_wait_for_sync_(declare_parameter<bool>("ptp.wait_for_sync", true)),
+    ptp_require_sync_(declare_parameter<bool>("ptp.require_sync", true)),
+    ptp_sync_timeout_ms_(declare_parameter<int>("ptp.sync_timeout_ms", 10000)),
+    ptp_sync_poll_ms_(declare_parameter<int>("ptp.sync_poll_ms", 250)),
+    ptp_accepted_statuses_(declare_parameter<std::vector<std::string>>(
+        "ptp.accepted_statuses",
+        std::vector<std::string>{"Slave"})),
+    ptp_action_role_(NormalizePtpActionRole(
+        declare_parameter<std::string>("ptp_action.role", "none"))),
+    ptp_action_selector_(declare_parameter<std::string>("ptp_action.selector", "Action0")),
+    ptp_action_trigger_selector_(declare_parameter<std::string>(
+        "ptp_action.trigger_selector", "FrameStart")),
+    ptp_action_trigger_source_(declare_parameter<std::string>(
+        "ptp_action.trigger_source", "Action0")),
+    ptp_action_trigger_activation_(declare_parameter<std::string>(
+        "ptp_action.trigger_activation", "RisingEdge")),
+    ptp_action_trigger_overlap_(declare_parameter<std::string>(
+        "ptp_action.trigger_overlap", "ReadOut")),
+    ptp_action_device_key_(ValidateUint32Parameter(
+        declare_parameter<std::int64_t>("ptp_action.device_key", 1),
+        "ptp_action.device_key")),
+    ptp_action_group_key_(ValidateUint32Parameter(
+        declare_parameter<std::int64_t>("ptp_action.group_key", 1),
+        "ptp_action.group_key")),
+    ptp_action_group_mask_(ValidateUint32Parameter(
+        declare_parameter<std::int64_t>("ptp_action.group_mask", 4294967295LL),
+        "ptp_action.group_mask")),
+    ptp_action_rate_hz_(declare_parameter<double>("ptp_action.rate_hz", 10.0)),
+    ptp_action_schedule_ahead_ms_(declare_parameter<double>(
+        "ptp_action.schedule_ahead_ms", 100.0)),
+    ptp_action_start_delay_ms_(declare_parameter<double>("ptp_action.start_delay_ms", 1000.0)),
+    ptp_action_request_ack_(declare_parameter<bool>("ptp_action.request_ack", false)),
+    ptp_action_expected_ack_count_(declare_parameter<int>("ptp_action.expected_ack_count", 0)),
+    ptp_action_log_interval_sec_(declare_parameter<double>("ptp_action.log_interval_sec", 5.0)),
     color_processing_(declare_parameter<std::string>("color_processing", "hq_linear")),
     rgb_compression_format_(declare_parameter<std::string>("rgb_compression_format", "jpeg")),
     rgb_jpeg_quality_(declare_parameter<int>("rgb_jpeg_quality", 90)),
@@ -515,6 +727,58 @@ public:
     if (!publish_raw_ && !publish_camera_info_ && !publish_metadata_ && !publish_rgb_compressed_) {
       throw std::runtime_error(
         "At least one of publish_raw, publish_camera_info, publish_metadata, or publish_rgb_compressed must be true.");
+    }
+
+    if (ptp_action_role_ != "none") {
+      if (hardware_trigger_role_ != "none") {
+        throw std::runtime_error(
+                "ptp_action.role cannot be combined with hardware_trigger.role. "
+                "Use PTP action triggering or BFS GPIO triggering, not both.");
+      }
+
+      if (!ptp_enabled_) {
+        ptp_enabled_ = true;
+        set_parameter(rclcpp::Parameter("ptp.enable", true));
+        RCLCPP_WARN(
+          get_logger(),
+          "ptp_action.role='%s' requires PTP. Enabling ptp.enable for this node.",
+          ptp_action_role_.c_str());
+      }
+    }
+
+    if (ptp_sync_timeout_ms_ < 0 || ptp_sync_poll_ms_ <= 0) {
+      throw std::runtime_error("ptp.sync_timeout_ms must be non-negative and ptp.sync_poll_ms must be positive.");
+    }
+
+    if (network_force_ip_enable_) {
+      if (network_force_ip_address_.empty()) {
+        throw std::runtime_error(
+                "network.force_ip.address must be set when network.force_ip.enable is true.");
+      }
+      if (network_force_ip_wait_after_ms_ < 0) {
+        throw std::runtime_error("network.force_ip.wait_after_ms must be non-negative.");
+      }
+      if (network_force_ip_rediscovery_timeout_ms_ < 0) {
+        throw std::runtime_error(
+                "network.force_ip.rediscovery_timeout_ms must be non-negative.");
+      }
+    }
+
+    if (ptp_action_role_ == "sender") {
+      if (ptp_action_rate_hz_ <= 0.0) {
+        throw std::runtime_error("ptp_action.rate_hz must be positive when ptp_action.role is sender.");
+      }
+      if (ptp_action_schedule_ahead_ms_ <= 0.0) {
+        throw std::runtime_error(
+                "ptp_action.schedule_ahead_ms must be positive when ptp_action.role is sender.");
+      }
+      if (ptp_action_start_delay_ms_ < 0.0 || ptp_action_log_interval_sec_ < 0.0) {
+        throw std::runtime_error(
+                "ptp_action.start_delay_ms and ptp_action.log_interval_sec must be non-negative.");
+      }
+      if (ptp_action_expected_ack_count_ < 0) {
+        throw std::runtime_error("ptp_action.expected_ack_count must be non-negative.");
+      }
     }
 
     const auto qos = BuildPublisherQoS();
@@ -603,6 +867,7 @@ public:
       InitializeCamera();
       running_.store(true);
       acquisition_thread_ = std::thread(&FlirSpinnakerCameraNode::AcquisitionLoop, this);
+      StartPtpActionSender();
     } catch (...) {
       ShutdownCamera();
       throw;
@@ -1317,6 +1582,11 @@ private:
     }
 
     camera_ = SelectCamera();
+    if (ApplyNetworkForceIpConfiguration(camera_)) {
+      camera_ = nullptr;
+      camera_ = WaitForSelectedCameraAfterForceIp();
+    }
+
     camera_->Init();
 
     INodeMap & node_map = camera_->GetNodeMap();
@@ -1330,6 +1600,9 @@ private:
     ApplyPixelFormat(node_map);
     SetContinuousAcquisition(node_map);
     InitializeControlParameters();
+    ApplyPtpConfiguration(node_map);
+    ApplyHardwareTriggerConfiguration(node_map);
+    ApplyPtpActionConfiguration(node_map);
 
     const std::string selected_serial = SafeNodeString(tl_node_map, "DeviceSerialNumber");
     const std::string selected_model = SafeNodeString(tl_node_map, "DeviceModelName");
@@ -1346,6 +1619,20 @@ private:
 
   CameraPtr SelectCamera()
   {
+    CameraPtr selected = TrySelectCamera();
+    if (selected) {
+      return selected;
+    }
+
+    if (!camera_serial_.empty()) {
+      throw std::runtime_error("Requested camera_serial was not found: " + camera_serial_);
+    }
+
+    throw std::runtime_error("camera_index is out of range.");
+  }
+
+  CameraPtr TrySelectCamera()
+  {
     if (!camera_serial_.empty()) {
       for (std::size_t index = 0; index < camera_list_.GetSize(); ++index) {
         CameraPtr candidate = camera_list_.GetByIndex(index);
@@ -1356,14 +1643,109 @@ private:
         }
       }
 
-      throw std::runtime_error("Requested camera_serial was not found: " + camera_serial_);
+      return nullptr;
     }
 
     if (camera_index_ < 0 || static_cast<std::size_t>(camera_index_) >= camera_list_.GetSize()) {
-      throw std::runtime_error("camera_index is out of range.");
+      return nullptr;
     }
 
     return camera_list_.GetByIndex(static_cast<unsigned int>(camera_index_));
+  }
+
+  CameraPtr WaitForSelectedCameraAfterForceIp()
+  {
+    const auto timeout = std::chrono::milliseconds(network_force_ip_rediscovery_timeout_ms_);
+    const auto poll_period = std::chrono::milliseconds(250);
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+
+    do {
+      camera_list_.Clear();
+      camera_list_ = system_->GetCameras();
+      if (CameraPtr selected = TrySelectCamera()) {
+        return selected;
+      }
+      std::this_thread::sleep_for(poll_period);
+    } while (std::chrono::steady_clock::now() < deadline);
+
+    camera_list_.Clear();
+    camera_list_ = system_->GetCameras();
+    return SelectCamera();
+  }
+
+  bool ApplyNetworkForceIpConfiguration(CameraPtr selected_camera)
+  {
+    if (!network_force_ip_enable_) {
+      return false;
+    }
+
+    INodeMap & tl_node_map = selected_camera->GetTLDeviceNodeMap();
+    const std::uint32_t target_address =
+      ParseIpv4Address(network_force_ip_address_, "network.force_ip.address");
+    const std::uint32_t target_subnet_mask =
+      ParseIpv4Address(network_force_ip_subnet_mask_, "network.force_ip.subnet_mask");
+    const std::uint32_t target_gateway =
+      ParseIpv4Address(network_force_ip_gateway_, "network.force_ip.gateway");
+
+    const auto current_address = ReadIntegerNodeValue(tl_node_map, "GevDeviceIPAddress");
+    if (current_address.has_value() && *current_address >= 0) {
+      const auto current_ipv4 = static_cast<std::uint32_t>(*current_address);
+      if (current_ipv4 == target_address) {
+        RCLCPP_INFO(
+          get_logger(),
+          "Camera serial '%s' already has requested IP %s. Skipping ForceIP.",
+          camera_serial_.c_str(),
+          FormatIpv4Address(target_address).c_str());
+        return false;
+      }
+
+      if (network_force_ip_only_if_link_local_ && !IsLinkLocalIpv4(current_ipv4)) {
+        RCLCPP_INFO(
+          get_logger(),
+          "Camera serial '%s' current IP is %s and target is %s. Applying ForceIP because "
+          "the current address does not match the requested camera inventory.",
+          camera_serial_.c_str(),
+          FormatIpv4Address(current_ipv4).c_str(),
+          FormatIpv4Address(target_address).c_str());
+      }
+    }
+
+    const auto wrong_subnet = ReadBooleanNodeValue(tl_node_map, "GevDeviceIsWrongSubnet");
+    RCLCPP_WARN(
+      get_logger(),
+      "Applying ForceIP to camera serial '%s': current_ip=%s wrong_subnet=%s target=%s/%s gateway=%s.",
+      camera_serial_.empty() ? "<index-selected>" : camera_serial_.c_str(),
+      current_address.has_value() && *current_address >= 0 ?
+      FormatIpv4Address(static_cast<std::uint32_t>(*current_address)).c_str() : "unknown",
+      wrong_subnet.has_value() ? (*wrong_subnet ? "true" : "false") : "unknown",
+      FormatIpv4Address(target_address).c_str(),
+      FormatIpv4Address(target_subnet_mask).c_str(),
+      FormatIpv4Address(target_gateway).c_str());
+
+    if (!SetIntegerByName(tl_node_map, "GevDeviceForceIPAddress", target_address) ||
+      !SetIntegerByName(tl_node_map, "GevDeviceForceSubnetMask", target_subnet_mask) ||
+      !SetIntegerByName(tl_node_map, "GevDeviceForceGateway", target_gateway))
+    {
+      throw std::runtime_error(
+              "Failed to write GevDeviceForceIPAddress/SubnetMask/Gateway on camera serial '" +
+              (camera_serial_.empty() ? std::string("<index-selected>") : camera_serial_) + "'.");
+    }
+
+    if (!ExecuteCommandByName(tl_node_map, "GevDeviceForceIP")) {
+      throw std::runtime_error(
+              "Failed to execute GevDeviceForceIP on camera serial '" +
+              (camera_serial_.empty() ? std::string("<index-selected>") : camera_serial_) + "'.");
+    }
+
+    if (network_force_ip_wait_after_ms_ > 0) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(network_force_ip_wait_after_ms_));
+    }
+
+    RCLCPP_INFO(
+      get_logger(),
+      "ForceIP command sent to camera serial '%s'; refreshing camera list.",
+      camera_serial_.empty() ? "<index-selected>" : camera_serial_.c_str());
+    return true;
   }
 
   void ApplyBufferHandlingMode(INodeMap & stream_node_map)
@@ -1435,6 +1817,644 @@ private:
     if (!SetEnumerationByName(node_map, "AcquisitionMode", "Continuous")) {
       throw std::runtime_error("Failed to set AcquisitionMode to Continuous.");
     }
+  }
+
+  void RequireEnumeration(
+    INodeMap & node_map,
+    const char * node_name,
+    const std::string & entry_name,
+    const std::string & context)
+  {
+    if (!SetEnumerationByName(node_map, node_name, entry_name)) {
+      throw std::runtime_error(
+              context + ": failed to set " + node_name + " to '" + entry_name + "'.");
+    }
+
+    RCLCPP_INFO(get_logger(), "%s: %s='%s'", context.c_str(), node_name, entry_name.c_str());
+  }
+
+  bool TryEnumeration(
+    INodeMap & node_map,
+    const char * node_name,
+    const std::string & entry_name,
+    const std::string & context)
+  {
+    if (!SetEnumerationByName(node_map, node_name, entry_name)) {
+      RCLCPP_DEBUG(
+        get_logger(),
+        "%s: %s='%s' is not available/writable.",
+        context.c_str(),
+        node_name,
+        entry_name.c_str());
+      return false;
+    }
+
+    RCLCPP_INFO(get_logger(), "%s: %s='%s'", context.c_str(), node_name, entry_name.c_str());
+    return true;
+  }
+
+  void ConfigureActionSelector(INodeMap & node_map, const std::string & context)
+  {
+    if (ptp_action_selector_.empty()) {
+      RCLCPP_WARN(
+        get_logger(),
+        "%s: ptp_action.selector is empty; leaving ActionSelector unchanged.",
+        context.c_str());
+      return;
+    }
+
+    if (TryEnumeration(node_map, "ActionSelector", ptp_action_selector_, context)) {
+      return;
+    }
+
+    const auto current_action = ReadEnumerationNodeValue(node_map, "ActionSelector");
+    if (current_action.has_value() && !current_action->empty()) {
+      RCLCPP_WARN(
+        get_logger(),
+        "%s: ActionSelector could not be set to '%s'; using current camera selection '%s'.",
+        context.c_str(),
+        ptp_action_selector_.c_str(),
+        current_action->c_str());
+      return;
+    }
+
+    RCLCPP_WARN(
+      get_logger(),
+      "%s: ActionSelector is not writable/readable; assuming the camera exposes a single action signal.",
+      context.c_str());
+  }
+
+  std::optional<std::int64_t> ReadIntegerNodeValue(
+    INodeMap & node_map,
+    const char * node_name) const
+  {
+    CIntegerPtr int_node = node_map.GetNode(node_name);
+    if (!IsReadable(int_node)) {
+      return std::nullopt;
+    }
+
+    return int_node->GetValue();
+  }
+
+  std::optional<bool> ReadBooleanNodeValue(
+    INodeMap & node_map,
+    const char * node_name) const
+  {
+    CBooleanPtr bool_node = node_map.GetNode(node_name);
+    if (!IsReadable(bool_node)) {
+      return std::nullopt;
+    }
+
+    return bool_node->GetValue();
+  }
+
+  std::optional<std::string> ReadEnumerationNodeValue(
+    INodeMap & node_map,
+    const char * node_name) const
+  {
+    CEnumerationPtr enum_node = node_map.GetNode(node_name);
+    if (!IsReadable(enum_node)) {
+      return std::nullopt;
+    }
+
+    return enum_node->ToString().c_str();
+  }
+
+  bool ExecuteCommandByName(INodeMap & node_map, const char * node_name) const
+  {
+    CCommandPtr command_node = node_map.GetNode(node_name);
+    if (!IsWritable(command_node)) {
+      return false;
+    }
+
+    command_node->Execute();
+    return true;
+  }
+
+  void RequireInteger(
+    INodeMap & node_map,
+    const char * node_name,
+    std::uint32_t value,
+    const std::string & context)
+  {
+    CIntegerPtr int_node = node_map.GetNode(node_name);
+    if (!IsWritable(int_node)) {
+      throw std::runtime_error(context + ": failed to set " + node_name + ".");
+    }
+
+    int_node->SetValue(value, true);
+    RCLCPP_INFO(get_logger(), "%s: %s=%u", context.c_str(), node_name, value);
+  }
+
+  bool SetIntegerByName(INodeMap & node_map, const char * node_name, std::uint32_t value) const
+  {
+    CIntegerPtr int_node = node_map.GetNode(node_name);
+    if (!IsWritable(int_node)) {
+      return false;
+    }
+
+    int_node->SetValue(value, true);
+    return true;
+  }
+
+  bool PtpStatusIsAccepted(const std::string & status) const
+  {
+    const std::string normalized_status = NormalizeName(status);
+    return std::any_of(
+      ptp_accepted_statuses_.begin(),
+      ptp_accepted_statuses_.end(),
+      [&](const std::string & accepted_status) {
+        return NormalizeName(accepted_status) == normalized_status;
+      });
+  }
+
+  void WaitForPtpSync(INodeMap & node_map)
+  {
+    const auto deadline = std::chrono::steady_clock::now() +
+      std::chrono::milliseconds(ptp_sync_timeout_ms_);
+    std::string last_status = "unknown";
+
+    while (rclcpp::ok()) {
+      ExecuteCommandByName(node_map, "GevIEEE1588DataSetLatch");
+
+      if (const auto status = ReadEnumerationNodeValue(node_map, "GevIEEE1588Status")) {
+        last_status = *status;
+        if (PtpStatusIsAccepted(last_status)) {
+          const auto offset_ns = ReadIntegerNodeValue(node_map, "GevIEEE1588OffsetFromMasterLatched");
+          if (offset_ns.has_value()) {
+            RCLCPP_INFO(
+              get_logger(),
+              "PTP synchronized: GevIEEE1588Status='%s', offset_from_master=%ld ns.",
+              last_status.c_str(),
+              static_cast<long>(*offset_ns));
+          } else {
+            RCLCPP_INFO(
+              get_logger(),
+              "PTP synchronized: GevIEEE1588Status='%s'.",
+              last_status.c_str());
+          }
+          return;
+        }
+      }
+
+      if (std::chrono::steady_clock::now() >= deadline) {
+        break;
+      }
+
+      std::this_thread::sleep_for(std::chrono::milliseconds(ptp_sync_poll_ms_));
+    }
+
+    std::ostringstream message;
+    message << "PTP did not reach accepted status before timeout. Last GevIEEE1588Status='"
+            << last_status << "', accepted=[";
+    for (std::size_t index = 0; index < ptp_accepted_statuses_.size(); ++index) {
+      if (index > 0U) {
+        message << ", ";
+      }
+      message << ptp_accepted_statuses_[index];
+    }
+    message << "].";
+
+    if (ptp_require_sync_) {
+      throw std::runtime_error(message.str());
+    }
+
+    RCLCPP_WARN(get_logger(), "%s Continuing because ptp.require_sync=false.", message.str().c_str());
+  }
+
+  void ApplyPtpConfiguration(INodeMap & node_map)
+  {
+    if (!ptp_enabled_) {
+      return;
+    }
+
+    const std::string context = "PTP";
+    if (!SetBooleanByName(node_map, "GevIEEE1588", true)) {
+      throw std::runtime_error(context + ": failed to enable GevIEEE1588.");
+    }
+    RCLCPP_INFO(get_logger(), "%s: GevIEEE1588=true", context.c_str());
+
+    if (!ptp_mode_.empty()) {
+      if (TryEnumeration(node_map, "GevIEEE1588Mode", ptp_mode_, context)) {
+        RCLCPP_INFO(get_logger(), "%s: requested mode '%s'.", context.c_str(), ptp_mode_.c_str());
+      } else {
+        RCLCPP_WARN(
+          get_logger(),
+          "%s: GevIEEE1588Mode='%s' is not writable/available. Continuing with camera default.",
+          context.c_str(),
+          ptp_mode_.c_str());
+      }
+    }
+
+    if (ptp_wait_for_sync_) {
+      WaitForPtpSync(node_map);
+    }
+  }
+
+  void ApplyHardwareTriggerConfiguration(INodeMap & node_map)
+  {
+    if (hardware_trigger_role_ == "none") {
+      return;
+    }
+
+    if (hardware_trigger_role_ == "master") {
+      ApplyBfsMasterHardwareTrigger(node_map);
+      return;
+    }
+
+    if (hardware_trigger_role_ == "slave") {
+      ApplyBfsSlaveHardwareTrigger(node_map);
+      return;
+    }
+
+    throw std::runtime_error("Unsupported hardware_trigger.role: " + hardware_trigger_role_);
+  }
+
+  void ApplyBfsMasterHardwareTrigger(INodeMap & node_map)
+  {
+    const std::string context = "BFS hardware trigger master";
+    RCLCPP_INFO(
+      get_logger(),
+      "Applying %s setup: output_line='%s', preferred_line_source='%s'.",
+      context.c_str(),
+      hardware_trigger_master_output_line_.c_str(),
+      hardware_trigger_master_line_source_.c_str());
+
+    RequireEnumeration(node_map, "AcquisitionMode", "Continuous", context);
+    RequireEnumeration(node_map, "TriggerSelector", "FrameStart", context);
+    RequireEnumeration(node_map, "TriggerMode", "Off", context);
+    RequireEnumeration(node_map, "LineSelector", hardware_trigger_master_output_line_, context);
+    RequireEnumeration(node_map, "LineMode", "Output", context);
+
+    std::vector<std::string> line_source_candidates;
+    if (!hardware_trigger_master_line_source_.empty()) {
+      line_source_candidates.push_back(hardware_trigger_master_line_source_);
+    }
+    for (const auto & fallback : hardware_trigger_master_line_source_fallbacks_) {
+      if (!fallback.empty() &&
+        std::find(line_source_candidates.begin(), line_source_candidates.end(), fallback) ==
+        line_source_candidates.end())
+      {
+        line_source_candidates.push_back(fallback);
+      }
+    }
+
+    std::string applied_line_source;
+    for (const auto & candidate : line_source_candidates) {
+      if (TryEnumeration(node_map, "LineSource", candidate, context)) {
+        applied_line_source = candidate;
+        break;
+      }
+    }
+
+    if (applied_line_source.empty()) {
+      throw std::runtime_error(
+              context + ": failed to set LineSource using configured candidates.");
+    }
+
+    if (hardware_trigger_master_enable_3v3_) {
+      EnableBfsMasterLine3v3(node_map, context);
+    }
+
+    RCLCPP_INFO(
+      get_logger(),
+      "BFS hardware trigger master ready: output_line='%s', line_source='%s'.",
+      hardware_trigger_master_output_line_.c_str(),
+      applied_line_source.c_str());
+  }
+
+  void EnableBfsMasterLine3v3(INodeMap & node_map, const std::string & context)
+  {
+    RequireEnumeration(node_map, "LineSelector", hardware_trigger_master_3v3_line_, context);
+
+    for (const auto & node_name : hardware_trigger_master_3v3_enable_nodes_) {
+      if (node_name.empty()) {
+        continue;
+      }
+
+      if (!SetBooleanByName(node_map, node_name.c_str(), true)) {
+        RCLCPP_DEBUG(
+          get_logger(),
+          "%s: 3.3V node '%s' is not available/writable on %s.",
+          context.c_str(),
+          node_name.c_str(),
+          hardware_trigger_master_3v3_line_.c_str());
+        continue;
+      }
+
+      RCLCPP_INFO(
+        get_logger(),
+        "%s: enabled 3.3V on %s via %s.",
+        context.c_str(),
+        hardware_trigger_master_3v3_line_.c_str(),
+        node_name.c_str());
+      return;
+    }
+
+    const std::string message =
+      context + ": failed to enable 3.3V on " + hardware_trigger_master_3v3_line_ +
+      " using configured node candidates.";
+    if (hardware_trigger_master_require_3v3_) {
+      throw std::runtime_error(message);
+    }
+
+    RCLCPP_WARN(get_logger(), "%s Continuing because require_3v3=false.", message.c_str());
+  }
+
+  void ApplyBfsSlaveHardwareTrigger(INodeMap & node_map)
+  {
+    const std::string context = "BFS hardware trigger slave";
+    RCLCPP_INFO(
+      get_logger(),
+      "Applying %s setup: trigger_source='%s'.",
+      context.c_str(),
+      hardware_trigger_slave_trigger_source_.c_str());
+
+    RequireEnumeration(node_map, "AcquisitionMode", "Continuous", context);
+    RequireEnumeration(node_map, "TriggerSelector", "FrameStart", context);
+    RequireEnumeration(node_map, "TriggerMode", "Off", context);
+    if (hardware_trigger_slave_trigger_source_.rfind("Line", 0) == 0) {
+      RequireEnumeration(node_map, "LineSelector", hardware_trigger_slave_trigger_source_, context);
+      RequireEnumeration(node_map, "LineMode", "Input", context);
+    }
+    RequireEnumeration(node_map, "TriggerSource", hardware_trigger_slave_trigger_source_, context);
+    if (!hardware_trigger_slave_trigger_activation_.empty()) {
+      RequireEnumeration(
+        node_map,
+        "TriggerActivation",
+        hardware_trigger_slave_trigger_activation_,
+        context);
+    }
+    if (!hardware_trigger_slave_trigger_overlap_.empty()) {
+      RequireEnumeration(
+        node_map,
+        "TriggerOverlap",
+        hardware_trigger_slave_trigger_overlap_,
+        context);
+    }
+    RequireEnumeration(node_map, "TriggerMode", "On", context);
+
+    RCLCPP_INFO(
+      get_logger(),
+      "BFS hardware trigger slave ready: trigger_source='%s'.",
+      hardware_trigger_slave_trigger_source_.c_str());
+  }
+
+  void ApplyPtpActionConfiguration(INodeMap & node_map)
+  {
+    if (ptp_action_role_ == "none") {
+      return;
+    }
+
+    const std::string context = "PTP action trigger " + ptp_action_role_;
+    RCLCPP_INFO(
+      get_logger(),
+      "Applying %s setup: action='%s', device_key=%u, group_key=%u, group_mask=%u.",
+      context.c_str(),
+      ptp_action_selector_.c_str(),
+      ptp_action_device_key_,
+      ptp_action_group_key_,
+      ptp_action_group_mask_);
+
+    RequireEnumeration(node_map, "AcquisitionMode", "Continuous", context);
+    ConfigureActionSelector(node_map, context);
+    RequireInteger(node_map, "ActionDeviceKey", ptp_action_device_key_, context);
+    RequireInteger(node_map, "ActionGroupKey", ptp_action_group_key_, context);
+    RequireInteger(node_map, "ActionGroupMask", ptp_action_group_mask_, context);
+    TryEnumeration(node_map, "ActionUnconditionalMode", "On", context);
+
+    RequireEnumeration(node_map, "TriggerSelector", ptp_action_trigger_selector_, context);
+    RequireEnumeration(node_map, "TriggerMode", "Off", context);
+    RequireEnumeration(node_map, "TriggerSource", ptp_action_trigger_source_, context);
+    if (!ptp_action_trigger_activation_.empty()) {
+      if (!TryEnumeration(
+        node_map,
+        "TriggerActivation",
+        ptp_action_trigger_activation_,
+        context))
+      {
+        RCLCPP_WARN(
+          get_logger(),
+          "%s: TriggerActivation='%s' is not writable for trigger_source='%s'; using camera default.",
+          context.c_str(),
+          ptp_action_trigger_activation_.c_str(),
+          ptp_action_trigger_source_.c_str());
+      }
+    }
+    if (!ptp_action_trigger_overlap_.empty()) {
+      if (!TryEnumeration(
+        node_map,
+        "TriggerOverlap",
+        ptp_action_trigger_overlap_,
+        context))
+      {
+        RCLCPP_WARN(
+          get_logger(),
+          "%s: TriggerOverlap='%s' is not writable for trigger_source='%s'; using camera default.",
+          context.c_str(),
+          ptp_action_trigger_overlap_.c_str(),
+          ptp_action_trigger_source_.c_str());
+      }
+    }
+    RequireEnumeration(node_map, "TriggerMode", "On", context);
+
+    RCLCPP_INFO(
+      get_logger(),
+      "PTP action trigger receiver armed: trigger_source='%s'.",
+      ptp_action_trigger_source_.c_str());
+  }
+
+  std::uint64_t ReadTimestampTickFrequency() const
+  {
+    if (camera_node_map_ == nullptr) {
+      throw std::runtime_error("Camera node map is not available.");
+    }
+
+    if (const auto frequency = ReadIntegerNodeValue(*camera_node_map_, "GevTimestampTickFrequency")) {
+      if (*frequency > 0) {
+        return static_cast<std::uint64_t>(*frequency);
+      }
+    }
+
+    RCLCPP_WARN(
+      get_logger(),
+      "Could not read GevTimestampTickFrequency. Assuming 1 GHz timestamp ticks.");
+    return 1000000000ULL;
+  }
+
+  std::uint64_t MillisecondsToTimestampTicks(double milliseconds, std::uint64_t tick_frequency) const
+  {
+    const long double ticks =
+      (static_cast<long double>(milliseconds) * static_cast<long double>(tick_frequency)) /
+      1000.0L;
+    if (ticks <= 0.0L) {
+      return 1ULL;
+    }
+
+    const long double max_ticks = static_cast<long double>(std::numeric_limits<std::uint64_t>::max());
+    if (ticks >= max_ticks) {
+      return std::numeric_limits<std::uint64_t>::max();
+    }
+
+    return static_cast<std::uint64_t>(std::llround(ticks));
+  }
+
+  std::uint64_t ReadCameraTimestampTicks() const
+  {
+    if (camera_node_map_ == nullptr) {
+      throw std::runtime_error("Camera node map is not available.");
+    }
+
+    if (!ExecuteCommandByName(*camera_node_map_, "TimestampLatch")) {
+      RCLCPP_DEBUG(get_logger(), "TimestampLatch is not available/writable; reading Timestamp directly.");
+    }
+
+    if (const auto timestamp = ReadIntegerNodeValue(*camera_node_map_, "TimestampLatchValue")) {
+      if (*timestamp >= 0) {
+        return static_cast<std::uint64_t>(*timestamp);
+      }
+    }
+
+    if (const auto timestamp = ReadIntegerNodeValue(*camera_node_map_, "Timestamp")) {
+      if (*timestamp >= 0) {
+        return static_cast<std::uint64_t>(*timestamp);
+      }
+    }
+
+    throw std::runtime_error("Failed to read camera timestamp for scheduled PTP action command.");
+  }
+
+  void SendScheduledActionCommand(std::uint64_t action_time)
+  {
+    if (!system_) {
+      throw std::runtime_error("Spinnaker system is not available.");
+    }
+
+    if (ptp_action_request_ack_ && ptp_action_expected_ack_count_ > 0) {
+      unsigned int result_count = static_cast<unsigned int>(ptp_action_expected_ack_count_);
+      const unsigned int expected_result_count = result_count;
+      std::vector<Spinnaker::ActionCommandResult> results(result_count);
+      system_->SendActionCommand(
+        ptp_action_device_key_,
+        ptp_action_group_key_,
+        ptp_action_group_mask_,
+        action_time,
+        true,
+        &result_count,
+        results.data());
+
+      if (result_count < expected_result_count) {
+        throw std::runtime_error(
+                "Scheduled action command received fewer acknowledgements than expected: " +
+                std::to_string(result_count) + "/" + std::to_string(expected_result_count) + ".");
+      }
+
+      for (unsigned int index = 0; index < result_count; ++index) {
+        if (results[index].Status == Spinnaker::SPINNAKER_ACTION_COMMAND_STATUS_OK) {
+          continue;
+        }
+
+        std::ostringstream message;
+        message << "Scheduled action command was not accepted by device 0x"
+                << std::hex << results[index].DeviceAddress << std::dec
+                << ": " << ActionCommandStatusName(results[index].Status)
+                << " (" << static_cast<int>(results[index].Status) << ").";
+        throw std::runtime_error(message.str());
+      }
+      return;
+    }
+
+    system_->SendActionCommand(
+      ptp_action_device_key_,
+      ptp_action_group_key_,
+      ptp_action_group_mask_,
+      action_time,
+      false,
+      nullptr,
+      nullptr);
+  }
+
+  void PtpActionSenderLoop()
+  {
+    try {
+      std::this_thread::sleep_for(
+        std::chrono::duration<double, std::milli>(ptp_action_start_delay_ms_));
+
+      const std::uint64_t tick_frequency = ReadTimestampTickFrequency();
+      const std::uint64_t schedule_ahead_ticks =
+        MillisecondsToTimestampTicks(ptp_action_schedule_ahead_ms_, tick_frequency);
+      const std::uint64_t period_ticks =
+        MillisecondsToTimestampTicks(1000.0 / ptp_action_rate_hz_, tick_frequency);
+      const auto host_period =
+        std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+          std::chrono::duration<double>(1.0 / ptp_action_rate_hz_));
+      const auto log_interval =
+        std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+          std::chrono::duration<double>(ptp_action_log_interval_sec_));
+
+      std::uint64_t next_action_time = 0U;
+      std::uint64_t sent_count = 0U;
+      auto next_send_time = std::chrono::steady_clock::now();
+      auto next_log_time = std::chrono::steady_clock::now();
+
+      RCLCPP_INFO(
+        get_logger(),
+        "PTP action sender started: rate=%.3f Hz, schedule_ahead=%.3f ms.",
+        ptp_action_rate_hz_,
+        ptp_action_schedule_ahead_ms_);
+
+      while (rclcpp::ok() && running_.load()) {
+        const std::uint64_t camera_now = ReadCameraTimestampTicks();
+        const std::uint64_t earliest_action_time =
+          (std::numeric_limits<std::uint64_t>::max() - camera_now < schedule_ahead_ticks) ?
+          std::numeric_limits<std::uint64_t>::max() :
+          camera_now + schedule_ahead_ticks;
+
+        if (next_action_time < earliest_action_time) {
+          next_action_time = earliest_action_time;
+        }
+
+        SendScheduledActionCommand(next_action_time);
+        ++sent_count;
+
+        const auto now_time = std::chrono::steady_clock::now();
+        if (ptp_action_log_interval_sec_ > 0.0 && now_time >= next_log_time) {
+          RCLCPP_INFO(
+            get_logger(),
+            "PTP action sender scheduled %lu commands; next_action_time=%lu ticks.",
+            static_cast<unsigned long>(sent_count),
+            static_cast<unsigned long>(next_action_time));
+          next_log_time = now_time + log_interval;
+        }
+
+        next_action_time =
+          (std::numeric_limits<std::uint64_t>::max() - next_action_time < period_ticks) ?
+          earliest_action_time :
+          next_action_time + period_ticks;
+
+        next_send_time += host_period;
+        const auto loop_done_time = std::chrono::steady_clock::now();
+        if (loop_done_time < next_send_time) {
+          std::this_thread::sleep_until(next_send_time);
+        } else {
+          next_send_time = loop_done_time;
+        }
+      }
+    } catch (const std::exception & exception) {
+      if (running_.load()) {
+        RCLCPP_ERROR(get_logger(), "PTP action sender stopped after error: %s", exception.what());
+        running_.store(false);
+      }
+    }
+  }
+
+  void StartPtpActionSender()
+  {
+    if (ptp_action_role_ != "sender") {
+      return;
+    }
+
+    ptp_action_thread_ = std::thread(&FlirSpinnakerCameraNode::PtpActionSenderLoop, this);
   }
 
   sensor_msgs::msg::Image BuildImageMessage(
@@ -2195,6 +3215,10 @@ private:
       acquisition_thread_.join();
     }
 
+    if (ptp_action_thread_.joinable()) {
+      ptp_action_thread_.join();
+    }
+
     if (camera_) {
       try {
         if (acquisition_started_) {
@@ -2246,6 +3270,46 @@ private:
   bool auto_pixel_format_;
   std::string pixel_format_;
   std::string buffer_handling_mode_;
+  std::string hardware_trigger_role_;
+  std::string hardware_trigger_master_output_line_;
+  std::string hardware_trigger_master_line_source_;
+  std::vector<std::string> hardware_trigger_master_line_source_fallbacks_;
+  bool hardware_trigger_master_enable_3v3_;
+  bool hardware_trigger_master_require_3v3_;
+  std::string hardware_trigger_master_3v3_line_;
+  std::vector<std::string> hardware_trigger_master_3v3_enable_nodes_;
+  std::string hardware_trigger_slave_trigger_source_;
+  std::string hardware_trigger_slave_trigger_activation_;
+  std::string hardware_trigger_slave_trigger_overlap_;
+  bool network_force_ip_enable_;
+  std::string network_force_ip_address_;
+  std::string network_force_ip_subnet_mask_;
+  std::string network_force_ip_gateway_;
+  bool network_force_ip_only_if_link_local_;
+  int network_force_ip_wait_after_ms_;
+  int network_force_ip_rediscovery_timeout_ms_;
+  bool ptp_enabled_;
+  std::string ptp_mode_;
+  bool ptp_wait_for_sync_;
+  bool ptp_require_sync_;
+  int ptp_sync_timeout_ms_;
+  int ptp_sync_poll_ms_;
+  std::vector<std::string> ptp_accepted_statuses_;
+  std::string ptp_action_role_;
+  std::string ptp_action_selector_;
+  std::string ptp_action_trigger_selector_;
+  std::string ptp_action_trigger_source_;
+  std::string ptp_action_trigger_activation_;
+  std::string ptp_action_trigger_overlap_;
+  std::uint32_t ptp_action_device_key_;
+  std::uint32_t ptp_action_group_key_;
+  std::uint32_t ptp_action_group_mask_;
+  double ptp_action_rate_hz_;
+  double ptp_action_schedule_ahead_ms_;
+  double ptp_action_start_delay_ms_;
+  bool ptp_action_request_ack_;
+  int ptp_action_expected_ack_count_;
+  double ptp_action_log_interval_sec_;
   std::string color_processing_;
   std::string rgb_compression_format_;
   int rgb_jpeg_quality_;
@@ -2286,6 +3350,7 @@ private:
   std::atomic<bool> running_{false};
   bool acquisition_started_{false};
   std::thread acquisition_thread_;
+  std::thread ptp_action_thread_;
 };
 
 int main(int argc, char ** argv)

@@ -8,6 +8,7 @@ import html
 import json
 import mimetypes
 import os
+import re
 import socket
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -78,8 +79,29 @@ def load_json(path: Path) -> list[dict]:
     return payload
 
 
+def load_conversion_report(dataset: Path) -> dict:
+    path = dataset / "conversion_report.json"
+    if not path.exists():
+        return {}
+    with path.open("r", encoding="utf-8") as stream:
+        payload = json.load(stream)
+    return payload if isinstance(payload, dict) else {}
+
+
 def timestamp_to_iso(timestamp_us: int) -> str:
     return datetime.fromtimestamp(timestamp_us / 1_000_000, tz=timezone.utc).isoformat()
+
+
+def channel_sort_key(channel: str) -> tuple[int, str]:
+    upper = channel.upper()
+    if upper.endswith("_RAW") or "_RAW_" in upper:
+        kind_rank = 0
+    elif upper.endswith("_RGB") or "_RGB_" in upper:
+        kind_rank = 1
+    else:
+        kind_rank = 2
+    base = re.sub(r"_(RAW|RGB)(_|$)", "_", upper).strip("_")
+    return kind_rank, base
 
 
 def build_index(dataset: Path, version: str) -> dict:
@@ -96,6 +118,7 @@ def build_index(dataset: Path, version: str) -> dict:
         sensor = sensors.get(row["sensor_token"], {})
         channel_by_calibrated_sensor[token] = sensor.get("channel", "UNKNOWN")
 
+    report = load_conversion_report(dataset)
     sample_data_by_sample: dict[str, list[dict]] = {}
     channels = set()
     for row in sample_data:
@@ -118,7 +141,7 @@ def build_index(dataset: Path, version: str) -> dict:
 
     frames = []
     for sample_index, sample in enumerate(samples):
-        images = sorted(sample_data_by_sample.get(sample["token"], []), key=lambda row: row["channel"])
+        images = sorted(sample_data_by_sample.get(sample["token"], []), key=lambda row: channel_sort_key(row["channel"]))
         frames.append(
             {
                 "index": sample_index,
@@ -133,9 +156,11 @@ def build_index(dataset: Path, version: str) -> dict:
         "dataset": str(dataset),
         "version": version,
         "scene": load_json(table_root / "scene.json")[0] if (table_root / "scene.json").exists() else {},
-        "channels": sorted(channels),
+        "channels": sorted(channels, key=channel_sort_key),
         "frames": frames,
         "image_count": len(sample_data),
+        "undistorted_export": bool(report.get("undistorted_export", False)),
+        "preserve_bayer_raw": bool(report.get("preserve_bayer_raw", False)),
     }
 
 
@@ -147,6 +172,9 @@ def render_page(index: dict) -> bytes:
     frames_json = json.dumps(index["frames"])
     image_count = int(index["image_count"])
     sample_count = len(index["frames"])
+    preserve_bayer_raw = bool(index.get("preserve_bayer_raw", False))
+    body_class = "raw-bayer-view" if preserve_bayer_raw else ""
+    mode_label = " · undistorted raw Bayer + RGB" if preserve_bayer_raw else ""
 
     page = f"""<!doctype html>
 <html lang="ko">
@@ -310,8 +338,15 @@ def render_page(index: dict) -> bytes:
       gap: 10px;
       min-width: 0;
     }}
+    .stage.raw-rgb {{
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      align-items: start;
+    }}
     .stage img {{
       max-height: 62vh;
+    }}
+    .stage.raw-rgb img {{
+      max-height: 38vh;
     }}
     .timeline {{
       display: grid;
@@ -372,6 +407,7 @@ def render_page(index: dict) -> bytes:
       border-radius: 6px;
       overflow: hidden;
       background: #111820;
+      min-width: 0;
     }}
     img {{
       display: block;
@@ -396,6 +432,17 @@ def render_page(index: dict) -> bytes:
       font-weight: 700;
       color: #164b4b;
       white-space: nowrap;
+    }}
+    .missing-frame {{
+      display: grid;
+      place-items: center;
+      min-height: 160px;
+      border: 1px dashed var(--line);
+      border-radius: 6px;
+      background: #f1f4f4;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
     }}
     .empty {{
       padding: 28px;
@@ -430,15 +477,18 @@ def render_page(index: dict) -> bytes:
       .stage {{
         grid-template-columns: 1fr;
       }}
+      .stage.raw-rgb {{
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      }}
     }}
   </style>
 </head>
-<body>
+<body class="{body_class}">
   <header>
     <div class="bar">
       <div>
         <h1>{scene_name}</h1>
-        <div class="meta">{version} · {sample_count} timestamps · {image_count} images · timestamp ascending</div>
+        <div class="meta">{version} · {sample_count} timestamps · {image_count} images · timestamp ascending{mode_label}</div>
       </div>
       <div class="controls" id="controls"></div>
     </div>
@@ -460,6 +510,76 @@ def render_page(index: dict) -> bytes:
     const viewer = document.getElementById('viewer');
     const framePicker = document.getElementById('framePicker');
     let currentFrameIndex = frames.length > 0 ? frames[0].index : 0;
+
+    function isRawChannel(channel) {{
+      return /(^|_)RAW($|_)/.test(channel.toUpperCase());
+    }}
+
+    function isRgbChannel(channel) {{
+      return /(^|_)RGB($|_)/.test(channel.toUpperCase());
+    }}
+
+    function hasRawRgbLayout(images) {{
+      return images.some(image => isRawChannel(image.channel)) &&
+        images.some(image => isRgbChannel(image.channel));
+    }}
+
+    function cameraKeyForChannel(channel) {{
+      return channel.toUpperCase().replace(/_(RAW|RGB)(_|$).*$/, '');
+    }}
+
+    function compareCameraKeys(left, right) {{
+      return left.localeCompare(right, undefined, {{ numeric: true, sensitivity: 'base' }});
+    }}
+
+    function renderImageFigure(image) {{
+      return `
+        <figure class="${{isRawChannel(image.channel) ? 'raw-frame' : 'rgb-frame'}}">
+          <img class="${{isRawChannel(image.channel) ? 'raw-bayer-image' : ''}}" src="${{image.url}}" alt="${{image.channel}} ${{image.timestamp}}">
+          <figcaption>
+            <span class="channel">${{image.channel}}</span>
+            <span>${{image.width}}x${{image.height}}</span>
+          </figcaption>
+        </figure>
+      `;
+    }}
+
+    function renderMissingFrame(cameraKey, streamKind) {{
+      const label = cameraKey.replace(/^CAM_/, '');
+      return `
+        <div class="missing-frame" aria-label="${{label}} ${{streamKind}} missing">
+          <span>${{label}} ${{streamKind}}</span>
+        </div>
+      `;
+    }}
+
+    function renderRawRgbStage(images) {{
+      const groups = new Map();
+      const otherImages = [];
+
+      for (const image of images) {{
+        if (!isRawChannel(image.channel) && !isRgbChannel(image.channel)) {{
+          otherImages.push(image);
+          continue;
+        }}
+
+        const key = cameraKeyForChannel(image.channel);
+        if (!groups.has(key)) groups.set(key, {{ key, raw: null, rgb: null }});
+        const group = groups.get(key);
+        if (isRawChannel(image.channel)) group.raw = image;
+        else group.rgb = image;
+      }}
+
+      const pairedImages = Array.from(groups.values())
+        .sort((left, right) => compareCameraKeys(left.key, right.key))
+        .map(group => `
+          ${{group.raw ? renderImageFigure(group.raw) : renderMissingFrame(group.key, 'RAW')}}
+          ${{group.rgb ? renderImageFigure(group.rgb) : renderMissingFrame(group.key, 'RGB')}}
+        `)
+        .join('');
+
+      return pairedImages + otherImages.map(renderImageFigure).join('');
+    }}
 
     function getVisibleFrames() {{
       return frames
@@ -515,6 +635,10 @@ def render_page(index: dict) -> bytes:
       const frame = visibleFrames.find(candidate => candidate.index === currentFrameIndex) || visibleFrames[0];
       currentFrameIndex = frame.index;
       const visiblePosition = visibleFrames.findIndex(candidate => candidate.index === frame.index) + 1;
+      const rawRgbLayout = hasRawRgbLayout(frame.images);
+      const imagesMarkup = rawRgbLayout
+        ? renderRawRgbStage(frame.images)
+        : frame.images.map(renderImageFigure).join('');
 
       viewer.innerHTML = `
         <div class="viewer-top">
@@ -527,16 +651,8 @@ def render_page(index: dict) -> bytes:
           </div>
           <button class="nav" type="button" id="nextFrame" aria-label="Next timestamp">&gt;</button>
         </div>
-        <div class="stage">
-          ${{frame.images.map(image => `
-            <figure>
-              <img src="${{image.url}}" alt="${{image.channel}} ${{image.timestamp}}">
-              <figcaption>
-                <span class="channel">${{image.channel}}</span>
-                <span>${{image.width}}x${{image.height}}</span>
-              </figcaption>
-            </figure>
-          `).join('')}}
+        <div class="stage ${{rawRgbLayout ? 'raw-rgb' : ''}}">
+          ${{imagesMarkup}}
         </div>
       `;
       document.getElementById('prevFrame').addEventListener('click', () => moveFrame(-1, true));

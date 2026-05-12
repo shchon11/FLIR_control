@@ -14,9 +14,11 @@
 #include <functional>
 #include <iomanip>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <numeric>
+#include <queue>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -204,6 +206,7 @@ public:
     square_size_m_(declare_parameter<double>("square_size_m", 0.08)),
     min_observations_(declare_parameter<int>("min_observations", 5)),
     max_frame_age_ms_(declare_parameter<int>("max_frame_age_ms", 500)),
+    require_all_cameras_for_capture_(declare_parameter<bool>("require_all_cameras_for_capture", false)),
     display_window_(declare_parameter<bool>("display_window", true)),
     window_name_(declare_parameter<std::string>("window_name", "FLIR Extrinsic Calibration")),
     preview_max_width_(declare_parameter<int>("preview_max_width", 640)),
@@ -268,8 +271,8 @@ public:
 
     RCLCPP_INFO(
       get_logger(),
-      "Extrinsic calibration uses manual capture by default. Press space to capture an observation, "
-      "'c' to save, 'r' to reset, and 'q' to quit.");
+      "Extrinsic calibration uses manual pairwise graph capture by default. Press space to capture all cameras "
+      "that currently see the board, 'c' to save, 'r' to reset, and 'q' to quit.");
   }
 
   ~FlirCameraExtrinsicCalibrationNode() override
@@ -292,6 +295,7 @@ private:
 
   struct Observation
   {
+    std::vector<std::size_t> camera_indices;
     std::vector<CameraPose> poses;
   };
 
@@ -337,6 +341,7 @@ private:
 
   struct CaptureCameraSnapshot
   {
+    std::size_t camera_index{0U};
     std::string name;
     bool has_camera_info{false};
     rclcpp::Time received_time;
@@ -646,8 +651,10 @@ private:
     std::vector<CaptureCameraSnapshot> snapshots;
     std::lock_guard<std::mutex> lock(cameras_mutex_);
     snapshots.reserve(cameras_.size());
-    for (const CameraRuntime & camera : cameras_) {
+    for (std::size_t index = 0; index < cameras_.size(); ++index) {
+      const CameraRuntime & camera = cameras_[index];
       snapshots.push_back(CaptureCameraSnapshot{
+          index,
           camera.name,
           camera.has_camera_info,
           camera.received_time,
@@ -739,48 +746,67 @@ private:
     const rclcpp::Time capture_time = now();
 
     Observation observation;
+    observation.camera_indices.reserve(snapshots.size());
     observation.poses.reserve(snapshots.size());
     for (const CaptureCameraSnapshot & snapshot : snapshots) {
       if (snapshot.message == nullptr) {
-        RCLCPP_WARN(get_logger(), "Not capturing: %s has no image yet.", snapshot.name.c_str());
-        return;
+        RCLCPP_WARN(get_logger(), "Skipping %s: no image yet.", snapshot.name.c_str());
+        continue;
       }
 
       const auto age = capture_time - snapshot.received_time;
       if (age.nanoseconds() > static_cast<std::int64_t>(max_frame_age_ms_) * 1000000LL) {
         RCLCPP_WARN(
           get_logger(),
-          "Not capturing: %s image is stale (%.3f s old).",
+          "Skipping %s: image is stale (%.3f s old).",
           snapshot.name.c_str(),
           static_cast<double>(age.nanoseconds()) / 1.0e9);
-        return;
+        continue;
       }
 
       if (!snapshot.has_camera_info || !HasUsableCameraInfo(snapshot.camera_info)) {
-        RCLCPP_WARN(get_logger(), "Not capturing: %s has no usable CameraInfo.", snapshot.name.c_str());
-        return;
+        RCLCPP_WARN(get_logger(), "Skipping %s: no usable CameraInfo.", snapshot.name.c_str());
+        continue;
       }
 
       const cv::Mat full_resolution_bgr = DecodeCompressedImage(*snapshot.message);
       if (full_resolution_bgr.empty()) {
-        RCLCPP_WARN(get_logger(), "Not capturing: failed to decode latest image for %s.", snapshot.name.c_str());
-        return;
+        RCLCPP_WARN(get_logger(), "Skipping %s: failed to decode latest image.", snapshot.name.c_str());
+        continue;
       }
 
       std::vector<cv::Point2f> full_resolution_corners;
       if (!DetectChessboard(full_resolution_bgr, full_resolution_corners, false)) {
         RCLCPP_WARN(
           get_logger(),
-          "Not capturing: chessboard was not detected in latest full-resolution image for %s.",
+          "Skipping %s: chessboard was not detected in latest full-resolution image.",
           snapshot.name.c_str());
-        return;
+        continue;
       }
 
       CameraRuntime solved_camera;
       solved_camera.name = snapshot.name;
       solved_camera.camera_info = snapshot.camera_info;
       solved_camera.corners = std::move(full_resolution_corners);
+      observation.camera_indices.push_back(snapshot.camera_index);
       observation.poses.push_back(SolveCameraBoardPose(solved_camera));
+    }
+
+    if (require_all_cameras_for_capture_ && observation.poses.size() != cameras_.size()) {
+      RCLCPP_WARN(
+        get_logger(),
+        "Not capturing: require_all_cameras_for_capture=true but only %zu/%zu cameras see the board.",
+        observation.poses.size(),
+        cameras_.size());
+      return;
+    }
+
+    if (observation.poses.size() < 2U) {
+      RCLCPP_WARN(
+        get_logger(),
+        "Not capturing: need at least two cameras seeing the board for a pairwise graph observation. Got %zu.",
+        observation.poses.size());
+      return;
     }
 
     const double mean_error = std::accumulate(
@@ -791,13 +817,21 @@ private:
         return total + pose.reprojection_error;
       }) / static_cast<double>(observation.poses.size());
 
+    std::ostringstream captured_names;
+    for (std::size_t index = 0; index < observation.camera_indices.size(); ++index) {
+      if (index > 0U) {
+        captured_names << ", ";
+      }
+      captured_names << cameras_[observation.camera_indices[index]].name;
+    }
+
     observations_.push_back(std::move(observation));
 
     RCLCPP_INFO(
       get_logger(),
-      "Captured extrinsic observation %zu/%d. Mean solvePnP reprojection error: %.4f px.",
+      "Captured pairwise graph observation %zu with %s. Mean solvePnP reprojection error: %.4f px.",
       observations_.size(),
-      min_observations_,
+      captured_names.str().c_str(),
       mean_error);
   }
 
@@ -808,29 +842,63 @@ private:
     double reprojection_error{0.0};
   };
 
-  RelativePose RelativePoseForObservation(const Observation & observation, std::size_t camera_index) const
+  struct GraphEdge
   {
-    if (camera_index == reference_camera_index_) {
-      return RelativePose{};
-    }
+    std::size_t to{0U};
+    RelativePose transform_current_to;
+    std::size_t observations{0U};
+  };
 
-    const CameraPose & reference_pose = observation.poses[reference_camera_index_];
-    const CameraPose & camera_pose = observation.poses[camera_index];
+  struct GraphCameraPose
+  {
+    bool reachable{false};
+    RelativePose transform_ref_camera;
+    std::vector<std::size_t> path;
+    std::size_t min_edge_observations{0U};
+    double mean_path_reprojection_error{0.0};
+  };
 
+  RelativePose RelativePoseBetween(const CameraPose & parent_pose, const CameraPose & child_pose) const
+  {
     RelativePose relative;
     relative.rotation_ref_camera =
-      reference_pose.rotation_cam_board * camera_pose.rotation_cam_board.t();
+      parent_pose.rotation_cam_board * child_pose.rotation_cam_board.t();
     relative.translation_ref_camera =
-      reference_pose.translation_cam_board -
-      relative.rotation_ref_camera * camera_pose.translation_cam_board;
+      parent_pose.translation_cam_board -
+      relative.rotation_ref_camera * child_pose.translation_cam_board;
     relative.reprojection_error =
-      0.5 * (reference_pose.reprojection_error + camera_pose.reprojection_error);
+      0.5 * (parent_pose.reprojection_error + child_pose.reprojection_error);
     return relative;
   }
 
-  RelativePose AverageRelativePose(std::size_t camera_index) const
+  RelativePose InvertRelativePose(const RelativePose & transform_parent_child) const
   {
-    if (camera_index == reference_camera_index_) {
+    RelativePose inverted;
+    inverted.rotation_ref_camera = transform_parent_child.rotation_ref_camera.t();
+    inverted.translation_ref_camera =
+      -(inverted.rotation_ref_camera * transform_parent_child.translation_ref_camera);
+    inverted.reprojection_error = transform_parent_child.reprojection_error;
+    return inverted;
+  }
+
+  RelativePose ComposeRelativePoses(
+    const RelativePose & transform_parent_current,
+    const RelativePose & transform_current_child) const
+  {
+    RelativePose composed;
+    composed.rotation_ref_camera =
+      transform_parent_current.rotation_ref_camera * transform_current_child.rotation_ref_camera;
+    composed.translation_ref_camera =
+      transform_parent_current.rotation_ref_camera * transform_current_child.translation_ref_camera +
+      transform_parent_current.translation_ref_camera;
+    composed.reprojection_error =
+      transform_parent_current.reprojection_error + transform_current_child.reprojection_error;
+    return composed;
+  }
+
+  RelativePose AverageRelativePoses(const std::vector<RelativePose> & poses) const
+  {
+    if (poses.empty()) {
       return RelativePose{};
     }
 
@@ -844,8 +912,7 @@ private:
     bool has_first_quaternion = false;
     double error_sum = 0.0;
 
-    for (const Observation & observation : observations_) {
-      const RelativePose relative = RelativePoseForObservation(observation, camera_index);
+    for (const RelativePose & relative : poses) {
       translation_sum += relative.translation_ref_camera;
       Quaternion q = QuaternionFromRotation(relative.rotation_ref_camera);
       if (!has_first_quaternion) {
@@ -864,7 +931,7 @@ private:
       error_sum += relative.reprojection_error;
     }
 
-    const double count = static_cast<double>(observations_.size());
+    const double count = static_cast<double>(poses.size());
     const Quaternion average_quaternion = Normalized(Quaternion{
         quaternion_sum.x / count,
         quaternion_sum.y / count,
@@ -876,6 +943,106 @@ private:
     average.rotation_ref_camera = RotationFromQuaternion(average_quaternion);
     average.reprojection_error = error_sum / count;
     return average;
+  }
+
+  std::vector<std::vector<GraphEdge>> BuildPoseGraph() const
+  {
+    std::map<std::pair<std::size_t, std::size_t>, std::vector<RelativePose>> pair_observations;
+
+    for (const Observation & observation : observations_) {
+      if (observation.camera_indices.size() != observation.poses.size()) {
+        continue;
+      }
+
+      for (std::size_t first = 0; first < observation.camera_indices.size(); ++first) {
+        for (std::size_t second = first + 1U; second < observation.camera_indices.size(); ++second) {
+          const std::size_t first_camera = observation.camera_indices[first];
+          const std::size_t second_camera = observation.camera_indices[second];
+          const RelativePose first_to_second =
+            RelativePoseBetween(observation.poses[first], observation.poses[second]);
+
+          if (first_camera < second_camera) {
+            pair_observations[{first_camera, second_camera}].push_back(first_to_second);
+          } else {
+            pair_observations[{second_camera, first_camera}].push_back(InvertRelativePose(first_to_second));
+          }
+        }
+      }
+    }
+
+    std::vector<std::vector<GraphEdge>> graph(cameras_.size());
+    for (const auto & entry : pair_observations) {
+      const std::size_t parent = entry.first.first;
+      const std::size_t child = entry.first.second;
+      const RelativePose parent_to_child = AverageRelativePoses(entry.second);
+      const std::size_t count = entry.second.size();
+
+      graph[parent].push_back(GraphEdge{child, parent_to_child, count});
+      graph[child].push_back(GraphEdge{parent, InvertRelativePose(parent_to_child), count});
+    }
+
+    return graph;
+  }
+
+  std::vector<GraphCameraPose> SolveGraphCameraPoses() const
+  {
+    std::vector<GraphCameraPose> solved(cameras_.size());
+    if (cameras_.empty()) {
+      return solved;
+    }
+
+    const std::vector<std::vector<GraphEdge>> graph = BuildPoseGraph();
+    std::queue<std::size_t> pending;
+    solved[reference_camera_index_].reachable = true;
+    solved[reference_camera_index_].path = {reference_camera_index_};
+    solved[reference_camera_index_].min_edge_observations = 0U;
+    pending.push(reference_camera_index_);
+
+    while (!pending.empty()) {
+      const std::size_t current = pending.front();
+      pending.pop();
+
+      for (const GraphEdge & edge : graph[current]) {
+        if (solved[edge.to].reachable) {
+          continue;
+        }
+
+        solved[edge.to].reachable = true;
+        solved[edge.to].transform_ref_camera =
+          ComposeRelativePoses(solved[current].transform_ref_camera, edge.transform_current_to);
+        solved[edge.to].path = solved[current].path;
+        solved[edge.to].path.push_back(edge.to);
+
+        if (current == reference_camera_index_) {
+          solved[edge.to].min_edge_observations = edge.observations;
+          solved[edge.to].mean_path_reprojection_error = edge.transform_current_to.reprojection_error;
+        } else {
+          solved[edge.to].min_edge_observations =
+            std::min(solved[current].min_edge_observations, edge.observations);
+          const double previous_edges = static_cast<double>(solved[current].path.size() - 1U);
+          const double new_edges = previous_edges + 1.0;
+          solved[edge.to].mean_path_reprojection_error =
+            (solved[current].mean_path_reprojection_error * previous_edges +
+            edge.transform_current_to.reprojection_error) / new_edges;
+        }
+
+        pending.push(edge.to);
+      }
+    }
+
+    return solved;
+  }
+
+  std::string FormatGraphPath(const std::vector<std::size_t> & path) const
+  {
+    std::ostringstream stream;
+    for (std::size_t index = 0; index < path.size(); ++index) {
+      if (index > 0U) {
+        stream << " -> ";
+      }
+      stream << cameras_[path[index]].name;
+    }
+    return stream.str();
   }
 
   cv::Matx33d RotationFromQuaternion(const Quaternion & q) const
@@ -899,13 +1066,36 @@ private:
 
   void WriteExtrinsicsYaml()
   {
-    if (observations_.size() < static_cast<std::size_t>(std::max(1, min_observations_))) {
+    if (observations_.empty()) {
       RCLCPP_WARN(
         get_logger(),
-        "Need at least %d observations before saving extrinsics. Current count: %zu.",
-        min_observations_,
-        observations_.size());
+        "Need at least one pairwise observation before saving extrinsics.");
       return;
+    }
+
+    const std::vector<GraphCameraPose> graph_poses = SolveGraphCameraPoses();
+    for (std::size_t index = 0; index < cameras_.size(); ++index) {
+      if (!graph_poses[index].reachable) {
+        RCLCPP_WARN(
+          get_logger(),
+          "Cannot save extrinsics: %s is not connected to reference camera %s. "
+          "Capture pairwise observations that bridge the graph.",
+          cameras_[index].name.c_str(),
+          cameras_[reference_camera_index_].name.c_str());
+        return;
+      }
+
+      if (index != reference_camera_index_ &&
+        graph_poses[index].min_edge_observations < static_cast<std::size_t>(std::max(1, min_observations_)))
+      {
+        RCLCPP_WARN(
+          get_logger(),
+          "Cannot save extrinsics: path %s has only %zu observations on its weakest edge; need at least %d.",
+          FormatGraphPath(graph_poses[index].path).c_str(),
+          graph_poses[index].min_edge_observations,
+          min_observations_);
+        return;
+      }
     }
 
     const std::filesystem::path output_path(output_yaml_path_);
@@ -925,8 +1115,9 @@ private:
 
     for (std::size_t index = 0; index < cameras_.size(); ++index) {
       const CameraRuntime & camera = cameras_[index];
-      const RelativePose average = AverageRelativePose(index);
-      const Quaternion q = QuaternionFromRotation(average.rotation_ref_camera);
+      const GraphCameraPose & graph_pose = graph_poses[index];
+      const RelativePose & transform = graph_pose.transform_ref_camera;
+      const Quaternion q = QuaternionFromRotation(transform.rotation_ref_camera);
       const std::string serial_key = camera.serial.empty() ? camera.name : camera.serial;
 
       stream << "  \"" << EscapeYamlDoubleQuoted(serial_key) << "\":\n";
@@ -934,23 +1125,26 @@ private:
       stream << "    parent_frame: \"" << EscapeYamlDoubleQuoted(reference_frame_) << "\"\n";
       stream << "    child_frame: \"" << EscapeYamlDoubleQuoted(camera.frame_id) << "\"\n";
       stream << "    translation_xyz_m: ["
-             << FormatDouble(average.translation_ref_camera[0]) << ", "
-             << FormatDouble(average.translation_ref_camera[1]) << ", "
-             << FormatDouble(average.translation_ref_camera[2]) << "]\n";
+             << FormatDouble(transform.translation_ref_camera[0]) << ", "
+             << FormatDouble(transform.translation_ref_camera[1]) << ", "
+             << FormatDouble(transform.translation_ref_camera[2]) << "]\n";
       stream << "    rotation_xyzw: ["
              << FormatDouble(q.x) << ", "
              << FormatDouble(q.y) << ", "
              << FormatDouble(q.z) << ", "
              << FormatDouble(q.w) << "]\n";
       stream << "    calibration:\n";
-      stream << "      method: \"multi_camera_chessboard\"\n";
+      stream << "      method: \"pairwise_graph_chessboard\"\n";
       stream << "      reference_camera: \"" << EscapeYamlDoubleQuoted(cameras_[reference_camera_index_].name) << "\"\n";
+      stream << "      graph_path: \"" << EscapeYamlDoubleQuoted(FormatGraphPath(graph_pose.path)) << "\"\n";
       stream << "      generated_at_utc: \"" << CurrentUtcTimestamp() << "\"\n";
       stream << "      board_cols: " << board_cols_ << "\n";
       stream << "      board_rows: " << board_rows_ << "\n";
       stream << "      square_size_m: " << FormatDouble(square_size_m_) << "\n";
       stream << "      observations: " << observations_.size() << "\n";
-      stream << "      mean_pair_reprojection_error: " << FormatDouble(average.reprojection_error) << "\n";
+      stream << "      path_min_edge_observations: " << graph_pose.min_edge_observations << "\n";
+      stream << "      mean_pair_reprojection_error: "
+             << FormatDouble(graph_pose.mean_path_reprojection_error) << "\n";
     }
 
     RCLCPP_INFO(
@@ -1073,6 +1267,7 @@ private:
   double square_size_m_;
   int min_observations_;
   int max_frame_age_ms_;
+  bool require_all_cameras_for_capture_;
   bool display_window_;
   std::string window_name_;
   int preview_max_width_;

@@ -1,0 +1,6 @@
+# Python dependencies for repo-local helper scripts and launch-time YAML parsing.
+# ROS Python modules such as rclpy, launch, launch_ros, and sensor_msgs are
+# provided by the ROS 2 Humble apt packages, not by PyPI.
+PyYAML>=5.4
+numpy>=1.21,<2.0
+opencv-python>=4.5,<4.12

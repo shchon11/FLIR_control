@@ -80,8 +80,10 @@ ros2 launch flir_camera_calibration multicam_calibration.launch.py camera_name:=
 ros2 launch flir_camera_calibration multicam_extrinsic_calibration.launch.py
 ```
 
-노드는 각 `/cameraN/image_rgb/compressed`와 `/cameraN/camera_info`를 구독하고,
-모든 카메라가 보드를 검출한 상태에서 사용자가 observation을 수동 수집한다.
+노드는 각 `/cameraN/image_rgb/compressed`와 `/cameraN/camera_info`를 구독한다.
+기본 모드에서는 보드를 현재 같이 보고 있는 카메라가 2대 이상이면 observation을
+수동 수집하고, 이렇게 모은 pairwise graph를 `reference_camera` 기준 rig frame으로
+합성한다.
 
 - `space`: 현재 observation 수동 캡처
 - `c`: `calibration/flir_camera_extrinsics.yaml` 저장
@@ -90,6 +92,12 @@ ros2 launch flir_camera_calibration multicam_extrinsic_calibration.launch.py
 
 기본 기준은 `camera0`이며, 저장된 transform은 `flir_rig_frame` 기준
 `cameraN_optical_frame` pose로 기록된다.
+예를 들어 `camera0-camera1` overlap에서 `space`를 `min_observations` 이상 누르고,
+이어서 `camera1-camera2` overlap에서도 같은 만큼 캡처하면 `camera2` pose는
+`camera0 -> camera1 -> camera2` graph path로 합성된다. 연결되지 않은 카메라가 있거나
+graph path의 가장 약한 edge observation 수가 `min_observations`보다 적으면 저장을
+거부한다. 모든 카메라가 동시에 보드를 볼 때만 캡처하려면
+`require_all_cameras_for_capture:=true`를 넘긴다.
 
 ## 메모
 

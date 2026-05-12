@@ -46,7 +46,7 @@ flir_camera:
     # - 즉 packed 포맷의 이득은 주로 camera->PC 링크에서 생기고,
     #   ros2 topic bw /image_raw 에서는 그대로 보이지 않을 수 있습니다.
     auto_pixel_format: false
-    pixel_format: "BayerRG8"
+    pixel_format: "BayerRG16"
     # OldestFirst: 쌓인 프레임을 순서대로 처리. 끊김은 줄 수 있지만 지연이 늘 수 있음.
     # NewestOnly : 오래된 프레임을 버리고 최신 프레임 위주로 처리. 지연은 적지만 점프처럼 보일 수 있음.
     buffer_handling_mode: "NewestOnly"
@@ -69,7 +69,7 @@ flir_camera:
     #   camera->PC 링크 대역폭은 줄이지 않습니다.
     # - JPEG: lossy, 보통 훨씬 작고 빠름
     # - PNG : lossless, 보통 더 크고 CPU 사용량이 큼
-    publish_raw: true
+    publish_raw: false
     publish_camera_info: true
     publish_metadata: true
     publish_rgb_compressed: true
@@ -128,9 +128,9 @@ flir_camera:
     # Enables manual frame-rate limiting. This is not an "auto FPS" switch:
     # true means the value below is applied, false means the camera free-runs /
     # uses its own maximum feasible acquisition rate.
-    camera.AcquisitionFrameRateEnable: true
+    camera.AcquisitionFrameRateEnable: false
     # Target frame rate in Hz.
-    camera.AcquisitionFrameRate: 5.0
+    # camera.AcquisitionFrameRate: 10.0
     # Multi-frame / burst related controls if you need them:
     # camera.AcquisitionFrameCount: 1
     # camera.AcquisitionBurstFrameCount: 1
@@ -201,6 +201,24 @@ flir_camera:
     # --------------------------------------------------------------------------
     # Trigger / external I/O
     # --------------------------------------------------------------------------
+    # High-level ordered setup for BFS GPIO hardware trigger.
+    # Keep this "none" in the shared config; multicam_cameras.yaml assigns
+    # camera-specific master/slave roles.
+    hardware_trigger.role: "none"        # none | master | slave
+    # Master: Line1 outputs ExposureActive, with safe LineSource fallbacks.
+    hardware_trigger.master.output_line: "Line1"
+    hardware_trigger.master.line_source: "ExposureActive"
+    hardware_trigger.master.line_source_fallbacks: ["FrameTriggerWait", "UserOutput0"]
+    # Master: enable 3.3V drive on Line2 for the BFS GPIO cable.
+    hardware_trigger.master.enable_3v3: true
+    hardware_trigger.master.require_3v3: true
+    hardware_trigger.master.line_3v3: "Line2"
+    hardware_trigger.master.line_3v3_enable_nodes: ["V3_3Enable", "Line3V3Enable", "LineVoltageEnable"]
+    # Slave: arm FrameStart from the BFS input line.
+    hardware_trigger.slave.trigger_source: "Line3"
+    hardware_trigger.slave.trigger_activation: "RisingEdge"
+    hardware_trigger.slave.trigger_overlap: "ReadOut"
+
     # Which trigger to configure.
     camera.TriggerSelector: "FrameStart"   # AcquisitionStart | FrameStart | FrameBurstStart
     # Enable or disable trigger mode.
@@ -214,6 +232,56 @@ flir_camera:
     # camera.LineMode: "Input"
     # camera.LineSource: "Off"
     # camera.LineInverter: false
+
+    # --------------------------------------------------------------------------
+    # GigE network bring-up / ForceIP
+    # --------------------------------------------------------------------------
+    # 카메라가 169.254.x.x link-local 주소로 뜨는 경우, Init 전에 serial별
+    # 고정 IP를 임시 할당합니다. 멀티캠에서는 config/multicam_cameras.yaml에서
+    # 카메라별 force_ip_address를 지정하세요. 현재 IP가 목표 IP와 다르면
+    # link-local 여부와 무관하게 목표 IP를 우선합니다.
+    network.force_ip.enable: true
+    network.force_ip.address: ""
+    network.force_ip.subnet_mask: "255.255.255.0"
+    network.force_ip.gateway: "0.0.0.0"
+    network.force_ip.only_if_link_local: true
+    network.force_ip.wait_after_ms: 1500
+    network.force_ip.rediscovery_timeout_ms: 5000
+
+    # --------------------------------------------------------------------------
+    # PTP + GigE Vision Action Command trigger
+    # --------------------------------------------------------------------------
+    # HW trigger 없이 여러 GigE 카메라를 맞출 때 사용합니다.
+    # PC에서는 별도로 linuxptp/ptp4l 을 해당 NIC에서 grandmaster로 실행하고,
+    # 카메라 노드는 아래 PTP 설정으로 camera clock을 slave 동기화합니다.
+    ptp.enable: false
+    ptp.mode: "SlaveOnly"
+    ptp.wait_for_sync: true
+    ptp.require_sync: true
+    ptp.sync_timeout_ms: 10000
+    ptp.sync_poll_ms: 250
+    ptp.accepted_statuses: ["Slave"]
+
+    # none    : PTP action trigger를 사용하지 않음
+    # receiver: Action0 FrameStart trigger를 arm함
+    # sender  : receiver 설정 + scheduled action command를 주기적으로 broadcast함
+    # 멀티캠에서는 sender를 정확히 한 카메라 노드에만 지정하세요.
+    ptp_action.role: "none"
+    ptp_action.selector: "Action0"
+    ptp_action.trigger_selector: "FrameStart"
+    ptp_action.trigger_source: "Action0"
+    ptp_action.trigger_activation: "RisingEdge"
+    ptp_action.trigger_overlap: "ReadOut"
+    ptp_action.device_key: 1
+    ptp_action.group_key: 1
+    ptp_action.group_mask: 4294967295
+    ptp_action.rate_hz: 5.0
+    # sender가 카메라 timestamp를 latch한 뒤 이만큼 미래의 PTP time으로 action을 예약합니다.
+    ptp_action.schedule_ahead_ms: 100.0
+    ptp_action.start_delay_ms: 1000.0
+    ptp_action.request_ack: false
+    ptp_action.expected_ack_count: 0
+    ptp_action.log_interval_sec: 5.0
 
     # --------------------------------------------------------------------------
     # Camera-side bandwidth limiting

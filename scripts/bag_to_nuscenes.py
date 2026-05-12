@@ -55,7 +55,9 @@ class CameraInfoRecord:
 
 @dataclass
 class ImageRecord:
+    stream_id: str
     camera_id: str
+    stream_kind: str
     channel: str
     topic: str
     msg_type: str
@@ -74,12 +76,14 @@ class ConversionSummary:
     version: str
     scene_name: str
     selected_topics: list[str]
-    channel_by_camera: dict[str, str]
-    frames_read_by_camera: dict[str, int]
+    channel_by_stream: dict[str, str]
+    camera_by_stream: dict[str, str]
+    frames_read_by_stream: dict[str, int]
     frames_written_by_channel: dict[str, int]
     samples_written: int
     sync_tolerance_ms: float
     undistorted_export: bool
+    preserve_bayer_raw: bool
 
 
 def parse_args() -> argparse.Namespace:
@@ -114,6 +118,22 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Image topic to export. Can be repeated. Defaults to undistorted "
             "image topics when present, otherwise RGB image topics that will be undistorted on export."
+        ),
+    )
+    parser.add_argument(
+        "--raw-bayer",
+        action="store_true",
+        help=(
+            "Export raw sensor_msgs/Image topics only. Bayer encodings are colorized as "
+            "the original sensor mosaic without demosaicing or undistortion."
+        ),
+    )
+    parser.add_argument(
+        "--raw-and-rgb",
+        action="store_true",
+        help=(
+            "Export both /image_raw and /image_rgb topics per camera. Raw Bayer images are "
+            "colorized as the original sensor mosaic, while RGB images stay RGB/BGR."
         ),
     )
     parser.add_argument(
@@ -246,9 +266,49 @@ def is_undistorted_topic(topic: str) -> bool:
     return "undistort" in topic.lower()
 
 
+def is_raw_image_topic(topic: TopicRecord | str) -> bool:
+    name = topic.name if isinstance(topic, TopicRecord) else topic
+    return bool(re.search(r"(^|/)image_raw($|/)", name))
+
+
+def is_rgb_image_topic(topic: TopicRecord | str) -> bool:
+    name = topic.name if isinstance(topic, TopicRecord) else topic
+    return bool(re.search(r"(^|/)image_rgb($|/)", name)) or "rgb" in name.lower()
+
+
+def stream_kind_from_topic(topic: str) -> str:
+    if is_raw_image_topic(topic):
+        return "raw"
+    if is_rgb_image_topic(topic):
+        return "rgb"
+    if is_undistorted_topic(topic):
+        return "undistorted"
+    return "image"
+
+
+def stream_id_for(camera_id: str, kind: str, needs_suffix: bool) -> str:
+    return f"{camera_id}_{kind}" if needs_suffix else camera_id
+
+
 def default_channel(camera_id: str) -> str:
     normalized = re.sub(r"[^A-Za-z0-9]+", "_", camera_id).strip("_").upper()
     return f"CAM_{normalized or 'CAMERA'}"
+
+
+def default_stream_channel(
+    camera_id: str,
+    stream_id: str,
+    kind: str,
+    needs_suffix: bool,
+    channel_overrides: dict[str, str],
+) -> str:
+    if stream_id in channel_overrides:
+        return channel_overrides[stream_id]
+
+    base_channel = channel_overrides.get(camera_id, default_channel(camera_id))
+    if needs_suffix:
+        return f"{base_channel}_{kind.upper()}"
+    return base_channel
 
 
 def parse_channel_overrides(values: list[str]) -> dict[str, str]:
@@ -265,9 +325,23 @@ def parse_channel_overrides(values: list[str]) -> dict[str, str]:
     return overrides
 
 
+def prefer_undistorted_topics(candidates: list[TopicRecord]) -> list[TopicRecord]:
+    selected: list[TopicRecord] = []
+    by_camera: dict[str, list[TopicRecord]] = {}
+    for topic in candidates:
+        by_camera.setdefault(camera_id_from_topic(topic.name), []).append(topic)
+
+    for camera_topics in by_camera.values():
+        undistorted = [topic for topic in camera_topics if is_undistorted_topic(topic.name)]
+        selected.extend(undistorted or camera_topics)
+    return selected
+
+
 def choose_image_topics(
     topics: dict[int, TopicRecord],
     requested_topics: list[str],
+    raw_bayer: bool,
+    raw_and_rgb: bool,
 ) -> list[TopicRecord]:
     if requested_topics:
         requested = set(requested_topics)
@@ -275,6 +349,30 @@ def choose_image_topics(
         missing = sorted(requested - {topic.name for topic in selected})
         if missing:
             raise ValueError(f"Requested image topics not found in bag: {', '.join(missing)}")
+    elif raw_and_rgb:
+        raw_topics = [
+            topic
+            for topic in topics.values()
+            if topic.msg_type == "sensor_msgs/msg/Image" and is_raw_image_topic(topic)
+        ]
+        rgb_topics = [
+            topic
+            for topic in topics.values()
+            if topic.msg_type in SUPPORTED_IMAGE_TYPES and is_rgb_image_topic(topic)
+        ]
+        if not raw_topics:
+            raise ValueError("No /image_raw sensor_msgs/Image topics found for --raw-and-rgb.")
+        if not rgb_topics:
+            raise ValueError("No /image_rgb topics found for --raw-and-rgb.")
+        selected = raw_topics + prefer_undistorted_topics(rgb_topics)
+    elif raw_bayer:
+        selected = [
+            topic
+            for topic in topics.values()
+            if topic.msg_type == "sensor_msgs/msg/Image" and is_raw_image_topic(topic)
+        ]
+        if not selected:
+            raise ValueError("No /image_raw sensor_msgs/Image topics found for --raw-bayer.")
     else:
         image_topics = [
             topic
@@ -282,7 +380,9 @@ def choose_image_topics(
             if topic.msg_type in SUPPORTED_IMAGE_TYPES and "/image" in topic.name
         ]
         undistorted_topics = [topic for topic in image_topics if is_undistorted_topic(topic.name)]
-        selected = undistorted_topics or image_topics
+        rgb_topics = [topic for topic in image_topics if is_rgb_image_topic(topic)]
+        raw_topics = [topic for topic in image_topics if is_raw_image_topic(topic)]
+        selected = undistorted_topics or rgb_topics or raw_topics or image_topics
 
     selected = sorted(selected, key=lambda topic: topic.name)
     if not selected:
@@ -410,7 +510,50 @@ def compressed_extension(data: bytes, declared_format: str) -> tuple[str, str]:
     return ".bin", "bin"
 
 
-def decode_raw_image(msg: Image) -> np.ndarray:
+BAYER_ENCODINGS = {
+    "bayer_rggb8",
+    "bayer_rggb16",
+    "bayer_bggr8",
+    "bayer_bggr16",
+    "bayer_gbrg8",
+    "bayer_gbrg16",
+    "bayer_grbg8",
+    "bayer_grbg16",
+}
+
+BAYER_PATTERNS = {
+    "bayer_rggb8": (("r", "g"), ("g", "b")),
+    "bayer_rggb16": (("r", "g"), ("g", "b")),
+    "bayer_bggr8": (("b", "g"), ("g", "r")),
+    "bayer_bggr16": (("b", "g"), ("g", "r")),
+    "bayer_gbrg8": (("g", "b"), ("r", "g")),
+    "bayer_gbrg16": (("g", "b"), ("r", "g")),
+    "bayer_grbg8": (("g", "r"), ("b", "g")),
+    "bayer_grbg16": (("g", "r"), ("b", "g")),
+}
+
+
+def is_bayer_encoding(encoding: str) -> bool:
+    return encoding.lower() in BAYER_ENCODINGS
+
+
+def colorize_bayer_mosaic(image: np.ndarray, encoding: str) -> np.ndarray:
+    pattern = BAYER_PATTERNS.get(encoding.lower())
+    if pattern is None:
+        return image
+    if image.ndim != 2:
+        return image
+
+    color = np.zeros((image.shape[0], image.shape[1], 3), dtype=image.dtype)
+    channel_by_color = {"b": 0, "g": 1, "r": 2}
+    for row_offset, row in enumerate(pattern):
+        for col_offset, color_name in enumerate(row):
+            channel = channel_by_color[color_name]
+            color[row_offset::2, col_offset::2, channel] = image[row_offset::2, col_offset::2]
+    return color
+
+
+def decode_raw_image(msg: Image, preserve_bayer: bool = False) -> np.ndarray:
     encoding = msg.encoding.lower()
     dtype = np.uint16 if encoding.endswith("16") else np.uint8
     channels = 1
@@ -420,11 +563,26 @@ def decode_raw_image(msg: Image) -> np.ndarray:
         channels = 4
 
     array = np.frombuffer(msg.data, dtype=dtype)
+    expected_row_values = int(msg.width) * channels
+    row_values = int(msg.step) // np.dtype(dtype).itemsize if msg.step else expected_row_values
+    if row_values < expected_row_values:
+        raise RuntimeError(
+            f"Image step is too small for {msg.encoding}: step={msg.step}, width={msg.width}"
+        )
+    required_values = int(msg.height) * row_values
+    if array.size < required_values:
+        raise RuntimeError(
+            f"Image data is too small for {msg.encoding}: got {array.size} values, "
+            f"need {required_values}"
+        )
+    array = array[:required_values].reshape((msg.height, row_values))[:, :expected_row_values]
     if channels > 1:
         array = array.reshape((msg.height, msg.width, channels))
     else:
         array = array.reshape((msg.height, msg.width))
 
+    if preserve_bayer and is_bayer_encoding(encoding):
+        return array
     if encoding == "rgb8":
         return cv2.cvtColor(array, cv2.COLOR_RGB2BGR)
     if encoding == "rgba8":
@@ -440,7 +598,12 @@ def decode_raw_image(msg: Image) -> np.ndarray:
     return array
 
 
-def undistort_image(image: np.ndarray, camera_info: CameraInfoRecord | None, camera_id: str) -> np.ndarray:
+def undistort_image(
+    image: np.ndarray,
+    camera_info: CameraInfoRecord | None,
+    camera_id: str,
+    interpolation: int = cv2.INTER_LINEAR,
+) -> np.ndarray:
     if camera_info is None:
         raise RuntimeError(f"Cannot undistort '{camera_id}' because no CameraInfo was found.")
     if len(camera_info.k) != 9:
@@ -450,21 +613,57 @@ def undistort_image(image: np.ndarray, camera_info: CameraInfoRecord | None, cam
 
     intrinsic = np.array(camera_info.k, dtype=np.float64).reshape(3, 3)
     distortion = np.array(camera_info.d, dtype=np.float64)
-    return cv2.undistort(image, intrinsic, distortion, None, intrinsic)
+    if interpolation == cv2.INTER_LINEAR:
+        return cv2.undistort(image, intrinsic, distortion, None, intrinsic)
+
+    map_x, map_y = cv2.initUndistortRectifyMap(
+        intrinsic,
+        distortion,
+        None,
+        intrinsic,
+        (image.shape[1], image.shape[0]),
+        cv2.CV_32FC1,
+    )
+    return cv2.remap(image, map_x, map_y, interpolation)
 
 
 def read_images(
     db3_files: list[Path],
     selected_topics: list[TopicRecord],
     channel_overrides: dict[str, str],
-) -> tuple[dict[str, list[ImageRecord]], dict[str, str]]:
+) -> tuple[dict[str, list[ImageRecord]], dict[str, str], dict[str, str]]:
     topic_by_id = {topic.topic_id: topic for topic in selected_topics}
     camera_by_topic = {topic.topic_id: camera_id_from_topic(topic.name) for topic in selected_topics}
-    channel_by_camera = {
-        camera_id: channel_overrides.get(camera_id, default_channel(camera_id))
-        for camera_id in sorted(set(camera_by_topic.values()))
+    stream_kind_by_topic = {
+        topic.topic_id: stream_kind_from_topic(topic.name) for topic in selected_topics
     }
-    frames_by_camera = {camera_id: [] for camera_id in channel_by_camera}
+    topics_by_camera: dict[str, list[int]] = {}
+    for topic_id, camera_id in camera_by_topic.items():
+        topics_by_camera.setdefault(camera_id, []).append(topic_id)
+
+    stream_by_topic = {
+        topic_id: stream_id_for(
+            camera_id,
+            stream_kind_by_topic[topic_id],
+            len(topics_by_camera[camera_id]) > 1,
+        )
+        for topic_id, camera_id in camera_by_topic.items()
+    }
+    camera_by_stream = {
+        stream_id: camera_by_topic[topic_id]
+        for topic_id, stream_id in stream_by_topic.items()
+    }
+    channel_by_stream = {
+        stream_id: default_stream_channel(
+            camera_by_topic[topic_id],
+            stream_id,
+            stream_kind_by_topic[topic_id],
+            len(topics_by_camera[camera_by_topic[topic_id]]) > 1,
+            channel_overrides,
+        )
+        for topic_id, stream_id in stream_by_topic.items()
+    }
+    frames_by_stream = {stream_id: [] for stream_id in channel_by_stream}
 
     for db3_file in db3_files:
         with sqlite3.connect(db3_file) as connection:
@@ -476,12 +675,16 @@ def read_images(
                     continue
 
                 camera_id = camera_by_topic[int(topic_id)]
-                channel = channel_by_camera[camera_id]
+                stream_id = stream_by_topic[int(topic_id)]
+                stream_kind = stream_kind_by_topic[int(topic_id)]
+                channel = channel_by_stream[stream_id]
                 if topic.msg_type == "sensor_msgs/msg/CompressedImage":
                     msg = deserialize_message(data, CompressedImage)
-                    frames_by_camera[camera_id].append(
+                    frames_by_stream[stream_id].append(
                         ImageRecord(
+                            stream_id=stream_id,
                             camera_id=camera_id,
+                            stream_kind=stream_kind,
                             channel=channel,
                             topic=topic.name,
                             msg_type=topic.msg_type,
@@ -493,9 +696,11 @@ def read_images(
                     )
                 elif topic.msg_type == "sensor_msgs/msg/Image":
                     msg = deserialize_message(data, Image)
-                    frames_by_camera[camera_id].append(
+                    frames_by_stream[stream_id].append(
                         ImageRecord(
+                            stream_id=stream_id,
                             camera_id=camera_id,
+                            stream_kind=stream_kind,
                             channel=channel,
                             topic=topic.name,
                             msg_type=topic.msg_type,
@@ -508,9 +713,9 @@ def read_images(
                         )
                     )
 
-    for frames in frames_by_camera.values():
+    for frames in frames_by_stream.values():
         frames.sort(key=lambda frame: frame.timestamp_ns)
-    return frames_by_camera, channel_by_camera
+    return frames_by_stream, channel_by_stream, camera_by_stream
 
 
 def group_samples(
@@ -594,10 +799,14 @@ def write_image_file(
     filename_base: str,
     camera_info: CameraInfoRecord | None,
     undistorted_export: bool,
+    preserve_bayer_raw: bool,
 ) -> tuple[str, str, int, int]:
     channel_dir = output / "samples" / record.channel
     channel_dir.mkdir(parents=True, exist_ok=True)
     should_undistort = undistorted_export and not is_undistorted_topic(record.topic)
+    should_preserve_bayer = preserve_bayer_raw and record.stream_kind == "raw"
+    if should_preserve_bayer:
+        should_undistort = False
 
     if record.msg_type == "sensor_msgs/msg/CompressedImage":
         extension, fileformat = compressed_extension(record.data, record.format)
@@ -624,9 +833,12 @@ def write_image_file(
         return relative_path.as_posix(), fileformat, width, height
 
     msg = deserialize_message(record.data, Image)
-    image = decode_raw_image(msg)
+    image = decode_raw_image(msg, preserve_bayer=should_preserve_bayer)
+    if should_preserve_bayer:
+        image = colorize_bayer_mosaic(image, msg.encoding)
     if should_undistort:
-        image = undistort_image(image, camera_info, record.camera_id)
+        interpolation = cv2.INTER_NEAREST if should_preserve_bayer else cv2.INTER_LINEAR
+        image = undistort_image(image, camera_info, record.camera_id, interpolation)
     relative_path = Path("samples") / record.channel / f"{filename_base}.png"
     image_path = output / relative_path
     if not cv2.imwrite(str(image_path), image):
@@ -669,10 +881,12 @@ def build_tables(
     scene_name: str,
     description: str,
     groups: list[dict[str, ImageRecord]],
-    channel_by_camera: dict[str, str],
+    channel_by_stream: dict[str, str],
+    camera_by_stream: dict[str, str],
     camera_info: dict[str, CameraInfoRecord],
     extrinsics: dict[str, dict[str, list[float]]],
     undistorted_export: bool,
+    preserve_bayer_raw: bool,
 ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, int]]:
     log_token = token_for("log", bag_name)
     scene_token = token_for("scene", bag_name, scene_name)
@@ -681,7 +895,8 @@ def build_tables(
 
     sensors = []
     calibrated_sensors = []
-    for camera_id, channel in sorted(channel_by_camera.items(), key=lambda item: item[1]):
+    for stream_id, channel in sorted(channel_by_stream.items(), key=lambda item: item[1]):
+        camera_id = camera_by_stream.get(stream_id, stream_id)
         sensor_token = token_for("sensor", channel)
         calibrated_sensor_token = token_for("calibrated_sensor", channel)
         info = camera_info.get(camera_id)
@@ -706,11 +921,11 @@ def build_tables(
     sample_records = []
     sample_data_records = []
     ego_pose_records = []
-    frames_written_by_channel = {channel: 0 for channel in channel_by_camera.values()}
+    frames_written_by_channel = {channel: 0 for channel in channel_by_stream.values()}
 
     sample_tokens: list[str] = []
     per_channel_sample_data_tokens: dict[str, list[str]] = {
-        channel: [] for channel in channel_by_camera.values()
+        channel: [] for channel in channel_by_stream.values()
     }
 
     for sample_index, group in enumerate(groups):
@@ -738,7 +953,7 @@ def build_tables(
             }
         )
 
-        for camera_id, frame in sorted(group.items(), key=lambda item: item[1].channel):
+        for _stream_id, frame in sorted(group.items(), key=lambda item: item[1].channel):
             channel = frame.channel
             sample_data_token = token_for(
                 "sample_data",
@@ -748,13 +963,14 @@ def build_tables(
                 ns_to_us(frame.timestamp_ns),
             )
             filename_base = f"{sample_token}__{channel}__{ns_to_us(frame.timestamp_ns)}"
-            info = camera_info.get(camera_id)
+            info = camera_info.get(frame.camera_id)
             filename, fileformat, width, height = write_image_file(
                 output,
                 frame,
                 filename_base,
                 info,
                 undistorted_export,
+                preserve_bayer_raw,
             )
             sample_data_records.append(
                 {
@@ -845,12 +1061,14 @@ def write_summary(summary: ConversionSummary) -> None:
         "version": summary.version,
         "scene_name": summary.scene_name,
         "selected_topics": summary.selected_topics,
-        "channel_by_camera": summary.channel_by_camera,
-        "frames_read_by_camera": summary.frames_read_by_camera,
+        "channel_by_stream": summary.channel_by_stream,
+        "camera_by_stream": summary.camera_by_stream,
+        "frames_read_by_stream": summary.frames_read_by_stream,
         "frames_written_by_channel": summary.frames_written_by_channel,
         "samples_written": summary.samples_written,
         "sync_tolerance_ms": summary.sync_tolerance_ms,
         "undistorted_export": summary.undistorted_export,
+        "preserve_bayer_raw": summary.preserve_bayer_raw,
     }
     with (summary.output / "conversion_report.json").open("w", encoding="utf-8") as stream:
         json.dump(payload, stream, indent=2)
@@ -865,17 +1083,22 @@ def print_summary(summary: ConversionSummary) -> None:
     print("topics:")
     for topic in summary.selected_topics:
         print(f"  - {topic}")
-    print("channels:")
-    for camera_id, channel in sorted(summary.channel_by_camera.items()):
-        read_count = summary.frames_read_by_camera.get(camera_id, 0)
+    print("streams:")
+    for stream_id, channel in sorted(summary.channel_by_stream.items()):
+        camera_id = summary.camera_by_stream.get(stream_id, stream_id)
+        read_count = summary.frames_read_by_stream.get(stream_id, 0)
         written_count = summary.frames_written_by_channel.get(channel, 0)
-        print(f"  - {camera_id} -> {channel}: read {read_count}, wrote {written_count}")
+        print(f"  - {stream_id} ({camera_id}) -> {channel}: read {read_count}, wrote {written_count}")
     print(f"samples: {summary.samples_written}")
     print(f"undistorted export: {summary.undistorted_export}")
+    print(f"preserve Bayer raw: {summary.preserve_bayer_raw}")
 
 
 def main() -> None:
     args = parse_args()
+    if args.raw_bayer and args.raw_and_rgb:
+        raise ValueError("Use only one of --raw-bayer or --raw-and-rgb.")
+
     root = workspace_root()
     bag_dir, db3_files = resolve_bag(args.bag, root)
     output = Path(args.output).expanduser() if args.output else root / "nuscenes_export" / bag_dir.name
@@ -883,10 +1106,14 @@ def main() -> None:
         output = (root / output).resolve()
 
     topics = load_topics(db3_files)
-    selected_topics = choose_image_topics(topics, args.image_topic)
+    selected_topics = choose_image_topics(topics, args.image_topic, args.raw_bayer, args.raw_and_rgb)
     channel_overrides = parse_channel_overrides(args.camera_channel)
-    frames_by_camera, channel_by_camera = read_images(db3_files, selected_topics, channel_overrides)
-    groups = group_samples(frames_by_camera, args.sync_tolerance_ms, args.limit)
+    frames_by_stream, channel_by_stream, camera_by_stream = read_images(
+        db3_files,
+        selected_topics,
+        channel_overrides,
+    )
+    groups = group_samples(frames_by_stream, args.sync_tolerance_ms, args.limit)
     if not groups:
         raise RuntimeError("No synchronized image samples could be formed from selected topics.")
 
@@ -895,9 +1122,10 @@ def main() -> None:
     extrinsics = load_extrinsics((root / args.extrinsics_yaml).resolve())
     scene_name = args.scene_name or bag_dir.name
     undistorted_export = not args.no_undistort
-    frames_read_by_camera = {
-        camera_id: len(frames)
-        for camera_id, frames in sorted(frames_by_camera.items())
+    preserve_bayer_raw = args.raw_bayer or args.raw_and_rgb
+    frames_read_by_stream = {
+        stream_id: len(frames)
+        for stream_id, frames in sorted(frames_by_stream.items())
     }
 
     if args.dry_run:
@@ -907,12 +1135,14 @@ def main() -> None:
             version=args.version,
             scene_name=scene_name,
             selected_topics=[topic.name for topic in selected_topics],
-            channel_by_camera=channel_by_camera,
-            frames_read_by_camera=frames_read_by_camera,
-            frames_written_by_channel={channel: 0 for channel in channel_by_camera.values()},
+            channel_by_stream=channel_by_stream,
+            camera_by_stream=camera_by_stream,
+            frames_read_by_stream=frames_read_by_stream,
+            frames_written_by_channel={channel: 0 for channel in channel_by_stream.values()},
             samples_written=len(groups),
             sync_tolerance_ms=args.sync_tolerance_ms,
             undistorted_export=undistorted_export,
+            preserve_bayer_raw=preserve_bayer_raw,
         )
         print_summary(summary)
         return
@@ -925,10 +1155,12 @@ def main() -> None:
         scene_name=scene_name,
         description=args.description,
         groups=groups,
-        channel_by_camera=channel_by_camera,
+        channel_by_stream=channel_by_stream,
+        camera_by_stream=camera_by_stream,
         camera_info=camera_info,
         extrinsics=extrinsics,
         undistorted_export=undistorted_export,
+        preserve_bayer_raw=preserve_bayer_raw,
     )
     write_json_tables(output, args.version, tables)
 
@@ -938,12 +1170,14 @@ def main() -> None:
         version=args.version,
         scene_name=scene_name,
         selected_topics=[topic.name for topic in selected_topics],
-        channel_by_camera=channel_by_camera,
-        frames_read_by_camera=frames_read_by_camera,
+        channel_by_stream=channel_by_stream,
+        camera_by_stream=camera_by_stream,
+        frames_read_by_stream=frames_read_by_stream,
         frames_written_by_channel=frames_written_by_channel,
         samples_written=len(groups),
         sync_tolerance_ms=args.sync_tolerance_ms,
         undistorted_export=undistorted_export,
+        preserve_bayer_raw=preserve_bayer_raw,
     )
     write_summary(summary)
     print_summary(summary)

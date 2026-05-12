@@ -106,7 +106,7 @@ def _build_node(context):
         if value is not None:
             parameter_overrides[name] = value
 
-    for name in ("display_window", "preview_fast_check"):
+    for name in ("display_window", "preview_fast_check", "require_all_cameras_for_capture"):
         value = _optional_override(context, name, _parse_bool)
         if value is not None:
             parameter_overrides[name] = value
@@ -193,6 +193,11 @@ def generate_launch_description():
             DeclareLaunchArgument("square_size_m", default_value="", description="Override chessboard square size in meters."),
             DeclareLaunchArgument("min_observations", default_value="", description="Override minimum observations."),
             DeclareLaunchArgument("max_frame_age_ms", default_value="", description="Override freshness limit for capture."),
+            DeclareLaunchArgument(
+                "require_all_cameras_for_capture",
+                default_value="",
+                description="Override whether each capture requires every configured camera to see the board.",
+            ),
             DeclareLaunchArgument("display_window", default_value="", description="Override OpenCV preview visibility."),
             DeclareLaunchArgument("window_name", default_value="", description="Override OpenCV preview window title."),
             DeclareLaunchArgument("preview_max_width", default_value="", description="Override preview detection max width."),
