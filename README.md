@@ -254,6 +254,12 @@ roslaunch flir_camera_undistort_viewer noetic_undistort_viewer.launch \
   input_topic:=/camera1/image_rgb/compressed \
   camera_info_topic:=/camera1/camera_info \
   output_topic:=/camera1/image_rgb/undistorted/compressed
+
+roslaunch flir_camera_undistort_viewer noetic_undistort_viewer.launch \
+  node_name:=camera2_undistort_viewer \
+  input_topic:=/camera2/image_rgb/compressed \
+  camera_info_topic:=/camera2/camera_info \
+  output_topic:=/camera2/image_rgb/undistorted/compressed
 ```
 
 출력:

@@ -165,8 +165,14 @@ rosrun flir_spinnaker_camera flir_multicam_inventory_tool \
   force_ip_gateway: "0.0.0.0"
 ```
 
-`noetic_multicam.launch`는 위 `force_ip_address`가 있는 카메라에 대해 기본으로
-ForceIP를 먼저 적용한다. 이미 원하는 IP이고 wrong-subnet 상태가 아니면 건너뛴다.
+`noetic_multicam.launch`는 `config/flir_camera.yaml`의
+`network.force_ip.enable` 값을 기본으로 따른다. launch에서 켜려면
+`force_ip_enable:=true`를 명시한다. 이미 원하는 IP이고 wrong-subnet 상태가
+아니면 건너뛴다.
+
+```bash
+roslaunch flir_spinnaker_camera noetic_multicam.launch force_ip_enable:=true
+```
 
 단일 카메라 테스트:
 
@@ -300,11 +306,13 @@ scripts/setup_camera_nic.bash --interface enp5s0 --host-cidr 192.168.1.10/24
 ```
 
 공통 설정은 `config/flir_camera.yaml`의 `ptp.*`와 `ptp_action.*`에서 조정한다.
-Noetic launch의 기본값은 `ptp_action_enable:=true`다. PTP status가 `Slave`가 되면
+Noetic launch는 PTP/action 관련 launch arg가 비어 있으면 YAML 값을 그대로 쓴다.
+PTP status가 `Slave`가 되면
 sender가 카메라 timestamp를 latch하고 100 ms 뒤의 PTP time으로 scheduled action
-command를 주기적으로 보낸다. 기본값은 `ptp_require_sync:=true`라서 `ptp4l`을 먼저
-띄우지 않으면 launch가 실패한다. Noetic launch에서 `ptp_action_rate_hz:=0.0`이면
-카메라의 resulting frame rate를 읽어서 가능한 rate를 자동으로 잡는다.
+command를 주기적으로 보낸다. `ptp.require_sync: true`면 `ptp4l`을 먼저 띄우지
+않으면 launch가 실패한다. YAML 또는 launch override에서 `ptp_action.rate_hz` /
+`ptp_action_rate_hz`를 `0.0`으로 두면 카메라의 resulting frame rate를 읽어서
+가능한 rate를 자동으로 잡는다.
 
 ```bash
 roslaunch flir_spinnaker_camera noetic_multicam.launch

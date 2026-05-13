@@ -7,10 +7,9 @@ flir_camera:
     camera_serial: ""
     camera_index: 0
     frame_id: "flir_camera_optical_frame"
-    # Keep this comfortably above the frame interval.
-    # For 1 Hz acquisition, 3000 ms prevents normal low-rate waits from being
-    # treated as Spinnaker receive errors.
-    acquisition_timeout_ms: 3000
+    # Keep this comfortably above the triggered frame interval. A longer timeout
+    # avoids log spam during short PTP action stalls.
+    acquisition_timeout_ms: 5000
     # Publisher QoS. best_effort + depth 5는 큰 이미지 토픽에서 subscriber 쪽 드롭이 쉽게 보일 수 있음.
     publisher_qos_reliability: "reliable"   # reliable | best_effort
     publisher_qos_depth: 20
@@ -240,7 +239,7 @@ flir_camera:
     # 고정 IP를 임시 할당합니다. 멀티캠에서는 config/multicam_cameras.yaml에서
     # 카메라별 force_ip_address를 지정하세요. 현재 IP가 목표 IP와 다르면
     # link-local 여부와 무관하게 목표 IP를 우선합니다.
-    network.force_ip.enable: true
+    network.force_ip.enable: false
     network.force_ip.address: ""
     network.force_ip.subnet_mask: "255.255.255.0"
     network.force_ip.gateway: "0.0.0.0"
@@ -288,16 +287,17 @@ flir_camera:
     # Camera-side bandwidth limiting
     # --------------------------------------------------------------------------
     # Limits the maximum bandwidth streamed by each camera in bytes/sec.
-    # 110 MB/s keeps some headroom below a 1 GbE camera link while allowing
-    # three cameras to aggregate comfortably over the 10 GbE PC uplink.
-    camera.DeviceLinkThroughputLimit: 110000000
+    # 75 MB/s leaves burst headroom for synchronized PTP action capture through
+    # a 1 GbE camera link and avoids NEW_BUFFER_DATA stalls on the receiver.
+    camera.DeviceLinkThroughputLimit: 75000000
     # Keep this below the PC NIC MTU 1500 unless every camera/switch/NIC port is
     # configured for jumbo frames. Mixed 1400/9000 camera packet sizes cause
     # IMAGE_MISSING_PACKETS on the non-matching stream.
     camera.GevSCPSPacketSize: 1400
-    # Keep packet pacing deterministic across cameras. Some cameras retain a
-    # large delay after being switched back from jumbo packets unless forced.
-    camera.GevSCPD: 1536
+    # Keep packet pacing deterministic across cameras. Synchronized action
+    # trigger makes all cameras burst together, so this is intentionally
+    # conservative rather than maximum-throughput.
+    camera.GevSCPD: 4096
     # Bandwidth reserve for link robustness / resends.
     # camera.DeviceLinkBandwidthReserve: 0
 
@@ -306,11 +306,11 @@ flir_camera:
     # --------------------------------------------------------------------------
     # Manual buffer count control on the host-side stream receiver.
     stream.StreamBufferCountMode: "Manual"
-    stream.StreamBufferCountManual: 32
+    stream.StreamBufferCountManual: 64
     # Packet resend support for GigE cameras.
     stream.StreamPacketResendEnable: true
     # Wait time after trailer reception before completing an image.
-    stream.StreamPacketResendTimeout: 80
+    stream.StreamPacketResendTimeout: 200
     # CRC checking on received images.
     # stream.StreamCRCCheckEnable: false
     # Current camera exposes only: "Socket"

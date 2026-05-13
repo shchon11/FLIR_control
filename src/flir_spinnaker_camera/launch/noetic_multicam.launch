@@ -7,19 +7,19 @@
   <arg name="publish_raw" default="" />
   <arg name="publish_rgb_compressed" default="true" />
   <arg name="rgb_jpeg_quality" default="80" />
-  <arg name="force_ip_enable" default="true" />
-  <arg name="force_ip_wait_after_ms" default="1500" />
-  <arg name="force_ip_rediscovery_timeout_ms" default="5000" />
-  <arg name="force_ip_max_attempts" default="3" />
-  <arg name="ptp_enable" default="false" />
-  <arg name="ptp_wait_for_sync" default="true" />
-  <arg name="ptp_require_sync" default="true" />
-  <arg name="ptp_sync_timeout_ms" default="10000" />
-  <arg name="ptp_action_enable" default="true" />
-  <arg name="ptp_action_rate_hz" default="0.0" />
-  <arg name="ptp_action_schedule_ahead_ms" default="100.0" />
-  <arg name="ptp_action_request_ack" default="false" />
-  <arg name="ptp_action_expected_ack_count" default="0" />
+  <arg name="force_ip_enable" default="" />
+  <arg name="force_ip_wait_after_ms" default="" />
+  <arg name="force_ip_rediscovery_timeout_ms" default="" />
+  <arg name="force_ip_max_attempts" default="" />
+  <arg name="ptp_enable" default="" />
+  <arg name="ptp_wait_for_sync" default="" />
+  <arg name="ptp_require_sync" default="" />
+  <arg name="ptp_sync_timeout_ms" default="" />
+  <arg name="ptp_action_enable" default="" />
+  <arg name="ptp_action_rate_hz" default="" />
+  <arg name="ptp_action_schedule_ahead_ms" default="" />
+  <arg name="ptp_action_request_ack" default="" />
+  <arg name="ptp_action_expected_ack_count" default="" />
   <arg name="ptp_master_interface" default="" />
   <arg name="ptp4l_binary" default="ptp4l" />
   <arg name="ptp4l_timestamping" default="software" />
@@ -47,19 +47,19 @@
     <param name="publish_rgb_compressed" value="$(arg publish_rgb_compressed)" />
     <param name="rgb_compression_format" value="jpeg" />
     <param name="rgb_jpeg_quality" value="$(arg rgb_jpeg_quality)" />
-    <param name="force_ip_enable" value="$(arg force_ip_enable)" />
-    <param name="force_ip_wait_after_ms" value="$(arg force_ip_wait_after_ms)" />
-    <param name="force_ip_rediscovery_timeout_ms" value="$(arg force_ip_rediscovery_timeout_ms)" />
-    <param name="force_ip_max_attempts" value="$(arg force_ip_max_attempts)" />
-    <param name="ptp_enable" value="$(arg ptp_enable)" />
-    <param name="ptp_wait_for_sync" value="$(arg ptp_wait_for_sync)" />
-    <param name="ptp_require_sync" value="$(arg ptp_require_sync)" />
-    <param name="ptp_sync_timeout_ms" value="$(arg ptp_sync_timeout_ms)" />
-    <param name="ptp_action_enable" value="$(arg ptp_action_enable)" />
-    <param name="ptp_action_rate_hz" value="$(arg ptp_action_rate_hz)" />
-    <param name="ptp_action_schedule_ahead_ms" value="$(arg ptp_action_schedule_ahead_ms)" />
-    <param name="ptp_action_request_ack" value="$(arg ptp_action_request_ack)" />
-    <param name="ptp_action_expected_ack_count" value="$(arg ptp_action_expected_ack_count)" />
+    <param if="$(eval arg('force_ip_enable') != '')" name="force_ip_enable" value="$(arg force_ip_enable)" type="bool" />
+    <param if="$(eval arg('force_ip_wait_after_ms') != '')" name="force_ip_wait_after_ms" value="$(arg force_ip_wait_after_ms)" />
+    <param if="$(eval arg('force_ip_rediscovery_timeout_ms') != '')" name="force_ip_rediscovery_timeout_ms" value="$(arg force_ip_rediscovery_timeout_ms)" />
+    <param if="$(eval arg('force_ip_max_attempts') != '')" name="force_ip_max_attempts" value="$(arg force_ip_max_attempts)" />
+    <param if="$(eval arg('ptp_enable') != '')" name="ptp_enable" value="$(arg ptp_enable)" type="bool" />
+    <param if="$(eval arg('ptp_wait_for_sync') != '')" name="ptp_wait_for_sync" value="$(arg ptp_wait_for_sync)" type="bool" />
+    <param if="$(eval arg('ptp_require_sync') != '')" name="ptp_require_sync" value="$(arg ptp_require_sync)" type="bool" />
+    <param if="$(eval arg('ptp_sync_timeout_ms') != '')" name="ptp_sync_timeout_ms" value="$(arg ptp_sync_timeout_ms)" />
+    <param if="$(eval arg('ptp_action_enable') != '')" name="ptp_action_enable" value="$(arg ptp_action_enable)" type="bool" />
+    <param if="$(eval arg('ptp_action_rate_hz') != '')" name="ptp_action_rate_hz" value="$(arg ptp_action_rate_hz)" />
+    <param if="$(eval arg('ptp_action_schedule_ahead_ms') != '')" name="ptp_action_schedule_ahead_ms" value="$(arg ptp_action_schedule_ahead_ms)" />
+    <param if="$(eval arg('ptp_action_request_ack') != '')" name="ptp_action_request_ack" value="$(arg ptp_action_request_ack)" type="bool" />
+    <param if="$(eval arg('ptp_action_expected_ack_count') != '')" name="ptp_action_expected_ack_count" value="$(arg ptp_action_expected_ack_count)" />
   </node>
 
   <include if="$(arg publish_extrinsics_tf)" file="$(find flir_spinnaker_camera)/launch/noetic_extrinsics_tf.launch">

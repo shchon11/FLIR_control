@@ -60,6 +60,8 @@ using Spinnaker::GenApi::IsAvailable;
 using Spinnaker::GenApi::IsReadable;
 using Spinnaker::GenApi::IsWritable;
 
+std::atomic_bool g_shutdown_due_to_fatal_error{false};
+
 std::string TrimAscii(std::string value)
 {
   const auto is_space = [](unsigned char character) {
@@ -69,6 +71,16 @@ std::string TrimAscii(std::string value)
   value.erase(value.begin(), std::find_if_not(value.begin(), value.end(), is_space));
   value.erase(std::find_if_not(value.rbegin(), value.rend(), is_space).base(), value.end());
   return value;
+}
+
+bool IsFatalSpinnakerException(const Spinnaker::Exception & exception)
+{
+  const int error = static_cast<int>(exception.GetError());
+  return exception == Spinnaker::SPINNAKER_ERR_IO ||
+    exception == Spinnaker::SPINNAKER_ERR_ABORT ||
+    exception == Spinnaker::SPINNAKER_ERR_INVALID_HANDLE ||
+    exception == Spinnaker::SPINNAKER_ERR_NOT_AVAILABLE ||
+    error == -1024;
 }
 
 std::string StripMatchingQuotes(std::string value)
@@ -1755,11 +1767,11 @@ public:
   void Stop()
   {
     running_.store(false);
-    if (acquisition_thread_.joinable()) {
-      acquisition_thread_.join();
-    }
     if (ptp_action_thread_.joinable()) {
       ptp_action_thread_.join();
+    }
+    if (acquisition_thread_.joinable()) {
+      acquisition_thread_.join();
     }
     if (camera_) {
       try {
@@ -2346,20 +2358,41 @@ public:
   std::uint64_t ReadCameraTimestampTicks()
   {
     INodeMap & node_map = camera_->GetNodeMap();
+    if (const auto timestamp = ReadIntegerByName(node_map, "Timestamp")) {
+      if (*timestamp >= 0) {
+        return static_cast<std::uint64_t>(*timestamp);
+      }
+    }
     if (!ExecuteCommandByName(node_map, "TimestampLatch")) {
-      ROS_DEBUG("[%s] TimestampLatch is not available/writable; reading Timestamp directly.", config_.name.c_str());
+      ROS_DEBUG("[%s] TimestampLatch is not available/writable.", config_.name.c_str());
     }
     if (const auto timestamp = ReadIntegerByName(node_map, "TimestampLatchValue")) {
       if (*timestamp >= 0) {
         return static_cast<std::uint64_t>(*timestamp);
       }
     }
-    if (const auto timestamp = ReadIntegerByName(node_map, "Timestamp")) {
-      if (*timestamp >= 0) {
-        return static_cast<std::uint64_t>(*timestamp);
-      }
-    }
     throw std::runtime_error("Failed to read camera timestamp for scheduled PTP action command.");
+  }
+
+  std::uint64_t EstimateCameraTimestampTicks(
+    std::uint64_t origin_ticks,
+    const std::chrono::steady_clock::time_point & origin_host_time,
+    std::uint64_t tick_frequency,
+    const std::chrono::steady_clock::time_point & now_host_time) const
+  {
+    const long double elapsed_sec =
+      std::chrono::duration<long double>(now_host_time - origin_host_time).count();
+    if (elapsed_sec <= 0.0L) {
+      return origin_ticks;
+    }
+
+    const long double elapsed_ticks =
+      elapsed_sec * static_cast<long double>(tick_frequency);
+    const long double max_ticks = static_cast<long double>(std::numeric_limits<std::uint64_t>::max());
+    if (elapsed_ticks >= max_ticks - static_cast<long double>(origin_ticks)) {
+      return std::numeric_limits<std::uint64_t>::max();
+    }
+    return origin_ticks + static_cast<std::uint64_t>(elapsed_ticks + 0.5L);
   }
 
   void SendScheduledActionCommand(std::uint64_t action_time)
@@ -2441,6 +2474,8 @@ public:
       const double action_rate_hz = ResolvePtpActionRateHz();
 
       const std::uint64_t tick_frequency = ReadTimestampTickFrequency();
+      const auto timestamp_origin_host_time = std::chrono::steady_clock::now();
+      const std::uint64_t timestamp_origin_ticks = ReadCameraTimestampTicks();
       const std::uint64_t schedule_ahead_ticks =
         MillisecondsToTimestampTicks(config_.ptp_action_schedule_ahead_ms, tick_frequency);
       const std::uint64_t period_ticks =
@@ -2461,33 +2496,63 @@ public:
         config_.name.c_str(), action_rate_hz, config_.ptp_action_schedule_ahead_ms);
 
       while (ros::ok() && running_.load()) {
-        const std::uint64_t camera_now = ReadCameraTimestampTicks();
-        const std::uint64_t earliest_action_time =
-          (std::numeric_limits<std::uint64_t>::max() - camera_now < schedule_ahead_ticks) ?
-          std::numeric_limits<std::uint64_t>::max() :
-          camera_now + schedule_ahead_ticks;
+        try {
+          const auto now_time = std::chrono::steady_clock::now();
+          const std::uint64_t camera_now = EstimateCameraTimestampTicks(
+            timestamp_origin_ticks,
+            timestamp_origin_host_time,
+            tick_frequency,
+            now_time);
+          const std::uint64_t earliest_action_time =
+            (std::numeric_limits<std::uint64_t>::max() - camera_now < schedule_ahead_ticks) ?
+            std::numeric_limits<std::uint64_t>::max() :
+            camera_now + schedule_ahead_ticks;
 
-        if (next_action_time < earliest_action_time) {
-          next_action_time = earliest_action_time;
-        }
+          if (next_action_time < earliest_action_time) {
+            next_action_time = earliest_action_time;
+          }
 
-        SendScheduledActionCommand(next_action_time);
-        ++sent_count;
+          SendScheduledActionCommand(next_action_time);
+          ++sent_count;
 
-        const auto now_time = std::chrono::steady_clock::now();
-        if (config_.ptp_action_log_interval_sec > 0.0 && now_time >= next_log_time) {
-          ROS_INFO(
-            "[%s] PTP action sender scheduled %lu commands; next_action_time=%lu ticks.",
+          if (config_.ptp_action_log_interval_sec > 0.0 && now_time >= next_log_time) {
+            ROS_INFO(
+              "[%s] PTP action sender scheduled %lu commands; next_action_time=%lu ticks.",
+              config_.name.c_str(),
+              static_cast<unsigned long>(sent_count),
+              static_cast<unsigned long>(next_action_time));
+            next_log_time = now_time + log_interval;
+          }
+
+          next_action_time =
+            (std::numeric_limits<std::uint64_t>::max() - next_action_time < period_ticks) ?
+            earliest_action_time :
+            next_action_time + period_ticks;
+        } catch (const Spinnaker::Exception & exception) {
+          if (IsFatalSpinnakerException(exception)) {
+            ROS_ERROR(
+              "[%s] Fatal PTP action sender Spinnaker error; stopping node: %s",
+              config_.name.c_str(),
+              exception.what());
+            running_.store(false);
+            g_shutdown_due_to_fatal_error.store(true);
+            ros::requestShutdown();
+            break;
+          }
+          ROS_WARN_THROTTLE(
+            2.0,
+            "[%s] PTP action send failed; keeping sender alive and retrying: %s",
             config_.name.c_str(),
-            static_cast<unsigned long>(sent_count),
-            static_cast<unsigned long>(next_action_time));
-          next_log_time = now_time + log_interval;
+            exception.what());
+          next_action_time = 0U;
+        } catch (const std::exception & exception) {
+          ROS_WARN_THROTTLE(
+            2.0,
+            "[%s] PTP action send failed; keeping sender alive and retrying: %s",
+            config_.name.c_str(),
+            exception.what());
+          next_action_time = 0U;
         }
-
-        next_action_time =
-          (std::numeric_limits<std::uint64_t>::max() - next_action_time < period_ticks) ?
-          earliest_action_time :
-          next_action_time + period_ticks;
 
         next_send_time += host_period;
         const auto loop_done_time = std::chrono::steady_clock::now();
@@ -2501,6 +2566,8 @@ public:
       if (running_.load()) {
         ROS_ERROR("[%s] PTP action sender stopped after error: %s", config_.name.c_str(), exception.what());
         running_.store(false);
+        g_shutdown_due_to_fatal_error.store(true);
+        ros::requestShutdown();
       }
     }
   }
@@ -2697,6 +2764,16 @@ public:
           } catch (...) {
           }
         }
+        if (IsFatalSpinnakerException(exception)) {
+          ROS_ERROR(
+            "[%s] Fatal Spinnaker acquisition error; stopping node: %s",
+            config_.name.c_str(),
+            exception.what());
+          running_.store(false);
+          g_shutdown_due_to_fatal_error.store(true);
+          ros::requestShutdown();
+          break;
+        }
         ROS_ERROR_THROTTLE(2.0, "[%s] Spinnaker acquisition error: %s", config_.name.c_str(), exception.what());
       } catch (const std::exception & exception) {
         if (image) {
@@ -2768,6 +2845,9 @@ int main(int argc, char ** argv)
     }
     camera_list.Clear();
     system->ReleaseInstance();
+    if (g_shutdown_due_to_fatal_error.load()) {
+      return 1;
+    }
   } catch (const std::exception & exception) {
     ROS_FATAL("flir_spinnaker_camera failed: %s", exception.what());
     return 1;
