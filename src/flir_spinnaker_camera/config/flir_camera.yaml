@@ -150,9 +150,9 @@ flir_camera:
     # Gain
     # --------------------------------------------------------------------------
     # Off | Once | Continuous
-    camera.GainAuto: "Off"
+    camera.GainAuto: "Continuous"
     # Gain in dB.
-    camera.GainDB_Val: 0.0
+    # camera.GainDB_Val: 0
     # Optional alternatives/related controls:
     # camera.Gain: 0.0
     # camera.GainRaw: 0
@@ -162,7 +162,7 @@ flir_camera:
     # White balance / color
     # --------------------------------------------------------------------------
     # Off | Once | Continuous
-    # camera.BalanceWhiteAuto: "Off"
+    # camera.BalanceWhiteAuto: "Continuous"
     # Select which channel ratio to edit.
     # camera.BalanceRatioSelector: "Red"     # Red | Blue
     # Manual white-balance ratio for the selected channel.
@@ -175,7 +175,7 @@ flir_camera:
     # Tone / black level
     # --------------------------------------------------------------------------
     # Enables/disables gamma correction.
-    # camera.GammaEnable: false
+    camera.GammaEnable: false
     # Gamma value when gamma is enabled.
     # camera.Gamma_FloatVal: 1.0
     # Video-signal offset in percent.
