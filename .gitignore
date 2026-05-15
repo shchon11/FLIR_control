@@ -1,6 +1,7 @@
 build/
 install/
 log/
+.omx/
 
 # ROS bag recordings and storage shards
 bag/
