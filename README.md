@@ -1,164 +1,177 @@
 # FLIR ROS Workspace
 
 FLIR/Teledyne Spinnaker 카메라를 ROS 2 Humble에서 쓰기 위한 워크스페이스다.
+카메라 스트리밍, intrinsic/extrinsic calibration, 왜곡 보정 스트림, ROS 2 bag
+기록, image-only nuScenes export까지 한 저장소에서 처리한다.
 
-이 저장소는 크게 세 가지를 맡는다.
+이 문서는 처음 실행할 때 필요한 순서와 자주 쓰는 명령을 먼저 보여준다. 패키지별
+세부 파라미터와 운영 노트는 각 패키지 README를 참조하면 된다.
 
-- 카메라 스트리밍
-- 체스보드 기반 캘리브레이션
-- 캘리브레이션 결과를 적용한 왜곡 보정 스트림
+## Quick Start
 
-## 환경과 빌드
-
-필수 환경:
-
-- Ubuntu
-- ROS 2 Humble
-- [Spinnaker SDK 4.x](https://www.teledynevisionsolutions.com/support/support-center/software-firmware-downloads/iis/spinnaker-sdk-download/spinnaker-sdk--download-files/?pn=Spinnaker+SDK&vn=Spinnaker+SDK)
-- OpenCV
-- linuxptp/PTP를 쓸 경우 `ptp4l`
-
-새 PC에서 처음 받을 때:
+새 PC에서 처음 한 번:
 
 ```bash
 sudo apt install python3-pip python3-colcon-common-extensions python3-rosdep linuxptp
 python3 -m pip install --user -r requirements.txt
 ```
 
-`rosdep`를 처음 쓰는 PC라면 한 번 초기화한다.
+`rosdep`를 처음 쓰는 PC라면 한 번만 초기화한다.
 
 ```bash
 sudo rosdep init
 rosdep update
 ```
 
-ROS 의존성은 `package.xml` 기준으로 설치한다.
+ROS 의존성 설치:
 
 ```bash
 rosdep install --from-paths src --ignore-src -r -y
 ```
 
-Spinnaker SDK는 위 Teledyne/FLIR 공식 다운로드 페이지에서 OS에 맞는 배포본을 받아
-설치해야 한다. 기본 위치가 아니면 `SPINNAKER_ROOT`를 직접 지정한다.
+Spinnaker SDK 4.x는 [Teledyne/FLIR 공식 배포본](https://www.teledynevisionsolutions.com/support/support-center/software-firmware-downloads/iis/spinnaker-sdk-download/spinnaker-sdk--download-files/?pn=Spinnaker+SDK&vn=Spinnaker+SDK)을
+설치해야 한다. 기본 위치가 아니면 직접 지정한다.
 
 ```bash
 export SPINNAKER_ROOT=/opt/spinnaker
 ```
 
-카메라 NIC와 PTP 권한은 helper로 맞출 수 있다.
-
-```bash
-scripts/setup_camera_nic.bash --interface enp5s0 --host-cidr 192.168.1.10/24
-```
-
-환경 스크립트:
+빌드와 실행:
 
 ```bash
 source scripts/setup_flir_env.bash
+colcon build --symlink-install
+source install/setup.bash
+ros2 launch flir_spinnaker_camera flir_camera.launch.py
 ```
 
-이 스크립트는:
+영상 확인:
+
+```bash
+ros2 run rqt_image_view rqt_image_view
+```
+
+## Common Commands
+
+단일 카메라:
+
+```bash
+ros2 launch flir_spinnaker_camera flir_camera.launch.py
+```
+
+시리얼을 지정해서 단일 카메라 실행:
+
+```bash
+ros2 launch flir_spinnaker_camera flir_camera.launch.py camera_serial:=12345678
+```
+
+멀티캠:
+
+```bash
+ros2 launch flir_spinnaker_camera multicam.launch.py
+```
+
+intrinsic calibration:
+
+```bash
+ros2 launch flir_camera_calibration calibration.launch.py
+```
+
+카메라별 intrinsic calibration:
+
+```bash
+ros2 launch flir_camera_calibration multicam_calibration.launch.py camera_name:=camera0
+```
+
+왜곡 보정 스트림:
+
+```bash
+ros2 launch flir_camera_undistort_viewer undistort_viewer.launch.py
+```
+
+멀티캠 왜곡 보정 스트림:
+
+```bash
+ros2 launch flir_camera_undistort_viewer multicam_undistort_viewer.launch.py
+```
+
+최신 bag을 nuScenes layout으로 변환:
+
+```bash
+python3 scripts/bag_to_nuscenes.py --overwrite
+```
+
+raw Bayer와 RGB를 함께 export:
+
+```bash
+python3 scripts/bag_to_nuscenes.py --raw-and-rgb --overwrite
+```
+
+변환 결과 확인:
+
+```bash
+python3 scripts/serve_nuscenes_images.py
+```
+
+## Repository Map
+
+| Path | Purpose |
+| --- | --- |
+| `src/flir_spinnaker_camera` | Spinnaker 카메라 노드, 단일/멀티캠 launch, ForceIP, trigger, PTP, TF |
+| `src/flir_camera_calibration` | 체스보드 기반 intrinsic/extrinsic calibration |
+| `src/flir_camera_undistort_viewer` | `/camera_info`를 사용한 왜곡 보정 이미지 퍼블리시 |
+| `scripts/bag_to_nuscenes.py` | ROS 2 bag을 image-only nuScenes dataset으로 변환 |
+| `scripts/serve_nuscenes_images.py` | 변환된 nuScenes 이미지를 timestamp 순서로 확인 |
+| `scripts/multicam_param_set.py` | 모든 camera namespace에 같은 ROS parameter 적용 |
+| `calibration/` | calibration YAML 산출물 위치 |
+| `bags/` | 로컬 ROS 2 bag 저장 위치, gitignore 처리 |
+| `nuscenes_export/` | 변환 결과 위치, gitignore 처리 |
+
+패키지별 상세 문서:
+
+- [`src/flir_spinnaker_camera/README.md`](src/flir_spinnaker_camera/README.md)
+- [`src/flir_camera_calibration/README.md`](src/flir_camera_calibration/README.md)
+- [`src/flir_camera_undistort_viewer/README.md`](src/flir_camera_undistort_viewer/README.md)
+
+## Environment Notes
+
+`scripts/setup_flir_env.bash`는 아래를 한 번에 맞춘다.
 
 - ROS 2 Humble source
 - `/opt/spinnaker`가 있으면 `SPINNAKER_ROOT` 설정
 - `install/setup.bash` source
 - `FLIR_ROS_WS` export
 
-전체 빌드:
+GigE 카메라 NIC와 PTP 권한은 helper로 맞출 수 있다.
 
 ```bash
-source scripts/setup_flir_env.bash
-colcon build --symlink-install
+scripts/setup_camera_nic.bash --interface enp5s0 --host-cidr 192.168.1.10/24
 ```
 
-## 패키지 맵
+## Camera Streaming
 
-### `flir_spinnaker_camera`
+`flir_spinnaker_camera`가 퍼블리시하는 기본 토픽:
 
-메인 카메라 노드다.
+- `/image_raw`
+- `/camera_info`
+- `/image_raw/metadata`
+- `/image_rgb/compressed`
 
-- 실제 FLIR 카메라를 Spinnaker로 열고 프레임을 받음
-- `/image_raw`, `/camera_info`, `/image_raw/metadata`, `/image_rgb/compressed` 퍼블리시
-- `camera_info.yaml_path`를 통해 저장된 캘리브레이션 YAML을 `/camera_info`에 반영 가능
+멀티캠에서는 namespace가 붙는다.
 
-자세한 내용:
+- `/camera0/image_rgb/compressed`
+- `/camera0/camera_info`
+- `/camera1/image_rgb/compressed`
+- `/camera1/camera_info`
 
-- [`src/flir_spinnaker_camera/README.md`](src/flir_spinnaker_camera/README.md)
+`/image_raw`는 raw/mono/Bayer 경로이고, `/image_rgb/compressed`는 host에서 RGB로
+변환한 뒤 JPEG 또는 PNG로 압축한 결과다. 원본 장치 timestamp는
+`/image_raw/metadata.camera_timestamp_ns`에 남는다.
 
-### `flir_camera_calibration`
+## Multicam Setup
 
-캘리브레이션 샘플 수집용 보조 패키지다.
-
-- `/image_rgb/compressed`를 구독
-- 체스보드가 보이면 `/calibration/image_annotated/compressed` 퍼블리시
-- `space`로 샘플 캡처, `c`로 캘리브레이션 실행
-- 결과를 `calibration/flir_camera_info.yaml`로 저장
-
-자세한 내용:
-
-- [`src/flir_camera_calibration/README.md`](src/flir_camera_calibration/README.md)
-
-### `flir_camera_undistort_viewer`
-
-캘리브레이션 결과를 적용한 왜곡 보정 스트림 퍼블리셔다.
-
-- `/image_rgb/compressed`와 `/camera_info`를 구독
-- 왜곡을 푼 결과를 `/image_rgb/undistorted/compressed`로 퍼블리시
-- 출력은 기본 `best_effort`
-
-자세한 내용:
-
-- [`src/flir_camera_undistort_viewer/README.md`](src/flir_camera_undistort_viewer/README.md)
-
-## 추천 워크플로
-
-### 1. 카메라만 먼저 보기
-
-```bash
-source scripts/setup_flir_env.bash
-colcon build --symlink-install --packages-select flir_spinnaker_camera
-ros2 launch flir_spinnaker_camera flir_camera.launch.py
-```
-
-### 2. 캘리브레이션 수행하기
-
-```bash
-source scripts/setup_flir_env.bash
-colcon build --symlink-install --packages-select flir_camera_calibration
-ros2 launch flir_camera_calibration calibration.launch.py
-```
-
-OpenCV 창에서:
-
-- `space`: 현재 보드 샘플 캡처
-- `c`: 캘리브레이션 실행 및 YAML 저장
-- `r`: 샘플 초기화
-- `q` 또는 `Esc`: 종료
-
-### 3. 캘리브레이션 결과를 메인 카메라에 반영하기
-
-`src/flir_spinnaker_camera/config/flir_camera.yaml`에 아래처럼 넣거나 launch 인자로 넘기면 된다.
-
-```yaml
-camera_info.yaml_path: "calibration/flir_camera_info.yaml"
-```
-
-### 4. 왜곡 보정된 스트림 퍼블리시하기
-
-```bash
-source scripts/setup_flir_env.bash
-colcon build --symlink-install --packages-select flir_camera_undistort_viewer
-ros2 launch flir_camera_undistort_viewer undistort_viewer.launch.py
-```
-
-`rqt_image_view`에서는 `/image_rgb/undistorted/compressed`를 바로 열면 된다.
-
-## 멀티캠 워크플로
-
-멀티캠은 `camera0`, `camera1` 같은 단순 namespace로 구분한다. 실제 장치 매핑은
-`src/flir_spinnaker_camera/config/multicam_cameras.yaml`의 serial이 책임진다.
-
-카메라 inventory 예:
+멀티캠 장치 매핑은 `src/flir_spinnaker_camera/config/multicam_cameras.yaml`에서
+serial 기준으로 관리한다.
 
 ```yaml
 flir_multicam:
@@ -174,50 +187,35 @@ flir_multicam:
         frame_id: "camera1_optical_frame"
 ```
 
-멀티캠 실행:
+연결된 카메라를 감지해서 inventory YAML을 갱신하려면:
 
 ```bash
-source scripts/setup_flir_env.bash
-colcon build --symlink-install
-ros2 launch flir_spinnaker_camera multicam.launch.py
+ros2 launch flir_spinnaker_camera multicam.launch.py auto_update_cameras_file:=true
 ```
 
-토픽은 아래처럼 분리된다.
+카메라별 ForceIP, GPIO hardware trigger, PTP scheduled action trigger, extrinsic TF
+설정은 `src/flir_spinnaker_camera/README.md`에 모아 두었다.
 
-- `/camera0/image_rgb/compressed`
-- `/camera0/camera_info`
-- `/camera1/image_rgb/compressed`
-- `/camera1/camera_info`
+## Calibration
 
-카메라별 intrinsic calibration:
+intrinsic calibration은 OpenCV 창에서 진행한다.
+
+- `space`: 현재 체스보드 샘플 캡처
+- `c`: calibration 실행 및 YAML 저장
+- `r`: 샘플 초기화
+- `q` 또는 `Esc`: 종료
+
+결과는 기본적으로 `calibration/flir_camera_info.yaml`에 저장된다. 카메라 노드에
+반영하려면 config 또는 launch argument로 YAML path를 넘긴다.
+
+```yaml
+camera_info.yaml_path: "calibration/flir_camera_info.yaml"
+```
 
 ```bash
-ros2 launch flir_camera_calibration multicam_calibration.launch.py camera_name:=camera0
-ros2 launch flir_camera_calibration multicam_calibration.launch.py camera_name:=camera1
+ros2 launch flir_spinnaker_camera flir_camera.launch.py \
+  camera_info_yaml_path:=calibration/flir_camera_info.yaml
 ```
-
-결과는 `calibration/flir_camera_info.yaml`의 `camera_info_by_serial` 아래에 serial별로 저장된다.
-한 카메라를 다시 calibration해도 다른 serial entry는 유지된다.
-
-멀티캠 undistort viewer:
-
-```bash
-ros2 launch flir_camera_undistort_viewer multicam_undistort_viewer.launch.py
-```
-
-출력:
-
-- `/camera0/image_rgb/undistorted/compressed`
-- `/camera1/image_rgb/undistorted/compressed`
-
-멀티캠 runtime control:
-
-```bash
-python3 scripts/multicam_param_set.py camera.ExposureAuto Off
-python3 scripts/multicam_param_set.py camera.GainAuto Off
-```
-
-이 스크립트는 inventory의 모든 camera namespace에 같은 `ros2 param set`을 적용한다.
 
 멀티캠 extrinsic calibration:
 
@@ -225,17 +223,11 @@ python3 scripts/multicam_param_set.py camera.GainAuto Off
 ros2 launch flir_camera_calibration multicam_extrinsic_calibration.launch.py
 ```
 
-overlap region에 체커보드를 두고, 보드를 같이 보는 카메라 pair마다 OpenCV 창의
-`space`를 눌러 observation을 수동 캡처한다. 예를 들어 `camera0-camera1`,
-`camera1-camera2`처럼 겹치는 구간을 각각 `min_observations` 이상 모으면 노드가
-pairwise graph를 `reference_camera` 기준 rig frame으로 합성한다. `c`를 누르면
-`calibration/flir_camera_extrinsics.yaml`에 `flir_rig_frame -> cameraN_optical_frame`
-transform 결과가 저장된다. 예전처럼 모든 카메라가 한 번에 보드를 봐야 하게 만들려면
-`require_all_cameras_for_capture:=true`를 넘긴다.
+결과는 `calibration/flir_camera_extrinsics.yaml`에 저장되고, multicam launch가
+기본적으로 `/tf_static`에 publish한다.
 
-### ROS 2 bag 기록하기
+## Recording Bags
 
-기본 저장 위치는 `bags/` 아래이고, bag 이름은 timestamp를 붙여 충돌을 피한다.
 nuScenes 변환만 할 거면 compressed RGB, `camera_info`, metadata를 같이 기록한다.
 
 ```bash
@@ -248,7 +240,7 @@ ros2 bag record \
   /camera2/image_rgb/compressed /camera2/camera_info /camera2/image_raw/metadata
 ```
 
-raw Bayer까지 같이 남겨서 나중에 raw/RGB를 함께 export하려면 `image_raw`도 포함한다.
+raw Bayer까지 남기려면 `/cameraN/image_raw`도 포함한다.
 
 ```bash
 mkdir -p bags
@@ -260,33 +252,32 @@ ros2 bag record \
   /camera2/image_raw /camera2/image_rgb/compressed /camera2/camera_info /camera2/image_raw/metadata
 ```
 
-### ROS 2 bag을 nuScenes 포맷으로 변환하기
+## nuScenes Export
 
-`bags/` 아래의 최신 ROS 2 bag을 image-only nuScenes 레이아웃으로 변환한다.
-기본값은 undistorted export다. bag에 `/cameraN/image_rgb/undistorted/compressed`
-토픽이 있으면 그 토픽을 우선 사용하고, 없으면 `/cameraN/image_rgb/compressed`를
-`CameraInfo`로 왜곡 보정해서 `samples/<CAM_CHANNEL>/`에 저장한다.
-nuScenes devkit이 읽는 `v1.0-mini/*.json` 테이블도 함께 생성된다.
+기본 변환은 최신 `bags/<bag_name>`을 찾아 `nuscenes_export/<bag_name>`에 쓴다.
+bag에 `/cameraN/image_rgb/undistorted/compressed`가 있으면 우선 사용하고, 없으면
+`/cameraN/image_rgb/compressed`를 `CameraInfo`로 왜곡 보정해서 저장한다.
 
 ```bash
 python3 scripts/bag_to_nuscenes.py --overwrite
 ```
 
-raw Bayer와 RGB를 같이 보고 싶으면 raw/RGB stream을 모두 export한다. 이때 raw는
-demosaic하거나 왜곡 보정하지 않고, RGGB 위치별로 색만 입힌 원본 Bayer mosaic PNG로
-저장한다. RGB stream은 기본대로 undistorted 이미지를 우선 사용하거나 변환 중 왜곡 보정한다.
+raw/RGB를 같이 export:
 
 ```bash
 python3 scripts/bag_to_nuscenes.py --raw-and-rgb --overwrite
 ```
 
-viewer에서는 bag에 들어있는 camera namespace 수만큼 채널을 자동으로 나열한다.
-raw/RGB를 같이 export한 경우 raw 채널과 RGB 채널을 함께 선택해서 비교할 수 있다.
-bag 안에 `/cameraN/image_raw`가 없으면 raw viewer용 export는 만들 수 없다.
-raw/RGB를 모두 남기려면 bag 기록 시 `/cameraN/image_raw`, `/cameraN/image_rgb/compressed`,
-`/cameraN/camera_info`를 같이 record한다.
+nuScenes 표준 채널명으로 매핑:
 
-기본 출력 위치:
+```bash
+python3 scripts/bag_to_nuscenes.py \
+  --camera-channel camera0=CAM_FRONT \
+  --camera-channel camera1=CAM_FRONT_RIGHT \
+  --overwrite
+```
+
+출력 구조:
 
 ```text
 nuscenes_export/<bag_name>/
@@ -297,58 +288,49 @@ nuscenes_export/<bag_name>/
   conversion_report.json
 ```
 
-nuScenes 표준 채널명으로 저장하고 싶으면 카메라 namespace를 명시적으로 매핑한다.
-
-```bash
-python3 scripts/bag_to_nuscenes.py \
-  --camera-channel camera0=CAM_FRONT \
-  --camera-channel camera1=CAM_FRONT_RIGHT \
-  --overwrite
-```
-
 변환기는 bag의 `/cameraN/camera_info`를 우선 사용하고, 없으면
 `calibration/flir_camera_info.yaml`을 fallback으로 사용한다. Extrinsic은
-`calibration/flir_camera_extrinsics.yaml`의 `rotation_xyzw`/`translation_xyz_m`을
-nuScenes `calibrated_sensor` 테이블에 넣는다.
-원본 이미지를 그대로 내보내야 할 때만 `--no-undistort`를 붙인다.
+`calibration/flir_camera_extrinsics.yaml`의 `rotation_xyzw`와
+`translation_xyz_m`을 nuScenes `calibrated_sensor` 테이블에 넣는다. 원본 이미지를
+그대로 내보내야 할 때만 `--no-undistort`를 붙인다.
 
-변환된 이미지를 timestamp 순서로 localhost에서 확인하려면:
+로컬 viewer:
 
 ```bash
 python3 scripts/serve_nuscenes_images.py
 ```
 
-기본적으로 최신 `nuscenes_export/<bag_name>`을 찾아 `http://127.0.0.1:8000`에
-띄운다. 특정 export를 보고 싶으면 dataset root를 인자로 넘긴다.
+기본 URL은 `http://127.0.0.1:8000`이다. 특정 export를 보려면 dataset root를
+인자로 넘긴다.
 
 ```bash
 python3 scripts/serve_nuscenes_images.py nuscenes_export/flir_multicam_20260509_200435
 ```
 
-뷰어는 현재 timestamp의 이미지만 크게 보여준다. 키보드 방향키로 이전/다음
-timestamp 이미지로 이동하고, `사진 목록`을 펼쳐 원하는 timestamp를 직접 선택할 수 있다.
+## Runtime Control
 
-## 토픽 흐름
+멀티캠 전체에 같은 ROS parameter를 적용하려면:
 
-기본 흐름은 아래처럼 보면 된다.
+```bash
+python3 scripts/multicam_param_set.py camera.ExposureAuto Off
+python3 scripts/multicam_param_set.py camera.GainAuto Off
+```
 
-1. `flir_spinnaker_camera`
-2. `/image_rgb/compressed`
-3. `flir_camera_calibration`
-4. `calibration/flir_camera_info.yaml`
-5. `flir_spinnaker_camera`의 `/camera_info`
-6. `flir_camera_undistort_viewer`
-7. `/image_rgb/undistorted/compressed`
+실제 Spinnaker node map 파라미터와 trigger/PTP 관련 세부 항목은
+[`src/flir_spinnaker_camera/README.md`](src/flir_spinnaker_camera/README.md)를
+기준으로 보면 된다.
 
-## 주요 산출물
+## Outputs
 
-- `calibration/flir_camera_info.yaml`: 캘리브레이션 결과
-- `calibration/captures/`: 캡처 샘플 이미지
+- `calibration/flir_camera_info.yaml`: intrinsic calibration 결과
+- `calibration/flir_camera_extrinsics.yaml`: multicam extrinsic 결과
+- `calibration/captures/`: calibration 캡처 이미지, gitignore 처리
+- `bags/`: ROS 2 bag, gitignore 처리
+- `nuscenes_export/`: nuScenes 변환 결과, gitignore 처리
 
-`calibration/captures/`는 gitignore 처리되어 있다.
+## Quick Diagnosis
 
-## 빠른 판단 기준
-
-- 카메라 연결/토픽 자체가 궁금하면 `flir_spinnaker_camera`
-- 보드 잡히는지 보고 캘리브레이션하려면 `flir_camera_calibration`
-- 캘리브레이션 결과로 왜곡 보정된 영상을 다시 쓰려면 `flir_camera_undistort_viewer`
+- 카메라 연결이나 토픽이 궁금하면 `flir_spinnaker_camera`
+- 체스보드 캡처와 intrinsic calibration이면 `flir_camera_calibration`
+- calibration 결과를 적용한 영상을 쓰려면 `flir_camera_undistort_viewer`
+- bag을 dataset으로 바꾸려면 `scripts/bag_to_nuscenes.py`

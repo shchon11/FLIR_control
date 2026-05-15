@@ -2,6 +2,48 @@
 
 FLIR/Spinnaker 카메라를 ROS 2 토픽으로 내보내는 메인 패키지다.
 
+## 먼저 볼 것
+
+처음 실행하거나 실험 중이면 이 블록만 먼저 보면 된다. 아래쪽은 ForceIP, trigger,
+PTP, TF 같은 장비별 reference다.
+
+```bash
+source scripts/setup_flir_env.bash
+colcon build --symlink-install --packages-select flir_spinnaker_camera
+source install/setup.bash
+ros2 launch flir_spinnaker_camera flir_camera.launch.py
+```
+
+자주 쓰는 실행:
+
+```bash
+# 단일 카메라, serial 지정
+ros2 launch flir_spinnaker_camera flir_camera.launch.py camera_serial:=12345678
+
+# 멀티캠
+ros2 launch flir_spinnaker_camera multicam.launch.py
+
+# 연결된 카메라로 multicam_cameras.yaml 자동 갱신
+ros2 launch flir_spinnaker_camera multicam.launch.py auto_update_cameras_file:=true
+
+# 모든 camera namespace에 같은 runtime parameter 적용
+python3 scripts/multicam_param_set.py camera.ExposureAuto Off
+```
+
+## 목차
+
+- [역할](#역할)
+- [퍼블리시 토픽](#퍼블리시-토픽)
+- [자주 보는 설정](#자주-보는-설정)
+- [calibration 적용](#calibration-적용)
+- [실행](#실행)
+- [멀티캠 실행](#멀티캠-실행)
+- [GigE ForceIP](#gige-forceip)
+- [BFS GPIO HW trigger](#bfs-gpio-hw-trigger)
+- [PTP scheduled action trigger](#ptp-scheduled-action-trigger)
+- [Extrinsic TF](#extrinsic-tf)
+- [운영 메모](#운영-메모)
+
 ## 역할
 
 - 카메라 오픈 및 acquisition
