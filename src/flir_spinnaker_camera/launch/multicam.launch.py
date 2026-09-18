@@ -487,6 +487,12 @@ def _build_camera_nodes(context):
                         "camera_serials": [
                             camera["serial"] for camera in cameras + thermal_cameras
                         ],
+                        # Cameras with no entry in the extrinsics YAML (thermal
+                        # A70s, or anything added before the rig is calibrated)
+                        # get an identity pose instead of taking the node down.
+                        "fallback_child_frames": [
+                            camera["frame_id"] for camera in cameras + thermal_cameras
+                        ],
                         "frame_prefix": extrinsics_tf_frame_prefix,
                     }
                 ],

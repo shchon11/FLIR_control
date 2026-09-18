@@ -184,6 +184,21 @@ bool ContainsString(const std::vector<std::string> & values, const std::string &
   return std::find(values.begin(), values.end(), target) != values.end();
 }
 
+std::string JoinStrings(const std::vector<std::string> & values, const std::string & separator)
+{
+  std::string joined;
+
+  for (std::size_t index = 0; index < values.size(); ++index) {
+    if (index != 0U) {
+      joined += separator;
+    }
+
+    joined += values[index];
+  }
+
+  return joined;
+}
+
 }  // namespace
 
 class FlirCameraExtrinsicsTfNode : public rclcpp::Node
@@ -197,6 +212,10 @@ public:
     camera_serials_(declare_parameter<std::vector<std::string>>(
         "camera_serials",
         std::vector<std::string>{})),
+    fallback_child_frames_(declare_parameter<std::vector<std::string>>(
+        "fallback_child_frames",
+        std::vector<std::string>{})),
+    fallback_parent_frame_(declare_parameter<std::string>("fallback_parent_frame", "")),
     frame_prefix_(declare_parameter<std::string>("frame_prefix", "")),
     normalize_quaternion_(declare_parameter<bool>("normalize_quaternion", true))
   {
@@ -205,7 +224,9 @@ public:
   }
 
 private:
-  std::vector<ExtrinsicTransform> LoadExtrinsicsYaml(const std::string & yaml_path) const
+  std::vector<ExtrinsicTransform> LoadExtrinsicsYaml(
+    const std::string & yaml_path,
+    std::string * reference_frame_out) const
   {
     std::ifstream stream(yaml_path);
     if (!stream.is_open()) {
@@ -321,6 +342,10 @@ private:
               yaml_path);
     }
 
+    if (reference_frame_out != nullptr) {
+      *reference_frame_out = reference_frame;
+    }
+
     return extrinsics;
   }
 
@@ -383,6 +408,31 @@ private:
            ContainsString(camera_serials_, extrinsic.child_frame);
   }
 
+  std::string FallbackParentFrame(const std::string & reference_frame) const
+  {
+    if (!fallback_parent_frame_.empty()) {
+      return fallback_parent_frame_;
+    }
+
+    if (!reference_frame.empty()) {
+      return reference_frame;
+    }
+
+    return "flir_rig_frame";
+  }
+
+  geometry_msgs::msg::TransformStamped BuildIdentityTransformMessage(
+    const std::string & parent_frame,
+    const std::string & child_frame) const
+  {
+    geometry_msgs::msg::TransformStamped transform;
+    transform.header.stamp = now();
+    transform.header.frame_id = FrameName(parent_frame);
+    transform.child_frame_id = FrameName(child_frame);
+    transform.transform.rotation.w = 1.0;
+    return transform;
+  }
+
   geometry_msgs::msg::TransformStamped BuildTransformMessage(
     const ExtrinsicTransform & extrinsic) const
   {
@@ -402,9 +452,26 @@ private:
 
   void PublishExtrinsics()
   {
-    const std::vector<ExtrinsicTransform> extrinsics = LoadExtrinsicsYaml(extrinsics_yaml_path_);
+    std::string reference_frame;
+    std::vector<ExtrinsicTransform> extrinsics;
+
+    try {
+      extrinsics = LoadExtrinsicsYaml(extrinsics_yaml_path_, &reference_frame);
+    } catch (const std::exception & exception) {
+      if (fallback_child_frames_.empty()) {
+        throw;
+      }
+
+      RCLCPP_WARN(
+        get_logger(),
+        "Could not read extrinsics from '%s' (%s). Falling back to identity poses.",
+        extrinsics_yaml_path_.c_str(),
+        exception.what());
+    }
+
     std::vector<geometry_msgs::msg::TransformStamped> transforms;
-    transforms.reserve(extrinsics.size());
+    transforms.reserve(extrinsics.size() + fallback_child_frames_.size());
+    std::vector<std::string> published_child_frames;
 
     for (const auto & extrinsic : extrinsics) {
       if (!ShouldPublish(extrinsic)) {
@@ -412,6 +479,25 @@ private:
       }
 
       transforms.push_back(BuildTransformMessage(extrinsic));
+      published_child_frames.push_back(extrinsic.child_frame);
+    }
+
+    // Before the rig is calibrated a camera has no entry in the extrinsics YAML
+    // (a thermal A70, or any freshly swapped-in camera). Give it an identity pose
+    // instead of killing the node: it sits at the rig origin, so the TF tree is
+    // complete but geometrically meaningless until the extrinsic calibration
+    // rewrites the YAML.
+    const std::string identity_parent_frame = FallbackParentFrame(reference_frame);
+    std::vector<std::string> identity_child_frames;
+
+    for (const std::string & child_frame : fallback_child_frames_) {
+      if (child_frame.empty() || ContainsString(published_child_frames, child_frame)) {
+        continue;
+      }
+
+      transforms.push_back(BuildIdentityTransformMessage(identity_parent_frame, child_frame));
+      published_child_frames.push_back(child_frame);
+      identity_child_frames.push_back(child_frame);
     }
 
     if (transforms.empty()) {
@@ -420,6 +506,17 @@ private:
     }
 
     static_broadcaster_->sendTransform(transforms);
+
+    if (!identity_child_frames.empty()) {
+      RCLCPP_WARN(
+        get_logger(),
+        "%zu camera(s) missing from '%s'; published identity (0 0 0) under '%s': %s",
+        identity_child_frames.size(),
+        extrinsics_yaml_path_.c_str(),
+        identity_parent_frame.c_str(),
+        JoinStrings(identity_child_frames, ", ").c_str());
+    }
+
     RCLCPP_INFO(
       get_logger(),
       "Published %zu static FLIR camera extrinsic transforms from '%s'.",
@@ -429,6 +526,8 @@ private:
 
   std::string extrinsics_yaml_path_;
   std::vector<std::string> camera_serials_;
+  std::vector<std::string> fallback_child_frames_;
+  std::string fallback_parent_frame_;
   std::string frame_prefix_;
   bool normalize_quaternion_;
   std::shared_ptr<tf2_ros::StaticTransformBroadcaster> static_broadcaster_;
