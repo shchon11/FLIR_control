@@ -1,5 +1,12 @@
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction, TimerAction
+from launch.actions import (
+    DeclareLaunchArgument,
+    ExecuteProcess,
+    OpaqueFunction,
+    RegisterEventHandler,
+    TimerAction,
+)
+from launch.event_handlers import OnProcessExit, OnProcessIO, OnProcessStart
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
@@ -399,6 +406,63 @@ def _build_camera_node(
     )
 
 
+# A node is "up" once it logs this; the next camera may then start safely.
+_CAMERA_READY_TEXT = b"Camera acquisition started"
+
+
+def _chain_camera_nodes(camera_nodes: list, timeout: float) -> list:
+    """Start camera nodes one after another instead of on a fixed timer.
+
+    Every camera node enumerates the whole rig before Init() (about 13 s with 15
+    cameras), and while it enumerates it holds a handle on every camera. A node
+    configuring its own camera at that moment can lose the register writes after
+    Init() (-1005/-1010), which are not retried, so on a fixed stagger the last
+    cameras to start died on every launch. Here camera k+1 starts only when camera
+    k logs "Camera acquisition started", exits, or has had `timeout` seconds, so
+    at most one node touches the rig at a time. The trade-off is time: the
+    enumeration repeats per node, so bring-up takes roughly N x 13 s.
+    """
+    actions = []
+    if not camera_nodes:
+        return actions
+
+    for current, following in zip(camera_nodes, camera_nodes[1:]):
+        fired = [False]
+
+        def start_following(*_args, following=following, fired=fired):
+            if fired[0]:
+                return []
+            fired[0] = True
+            return [following]
+
+        def on_output(event, start_following=start_following):
+            if _CAMERA_READY_TEXT in event.text:
+                return start_following()
+            return []
+
+        actions.append(RegisterEventHandler(OnProcessIO(
+            target_action=current, on_stdout=on_output, on_stderr=on_output)))
+        actions.append(RegisterEventHandler(OnProcessExit(
+            target_action=current, on_exit=start_following)))
+        if timeout > 0.0:
+            # A node stuck in its Init() retry loop must not hold up the rest of the rig.
+            actions.append(_timeout_after_start(current, timeout, start_following))
+
+    actions.append(camera_nodes[0])
+    return actions
+
+
+def _timeout_after_start(node, timeout: float, start_following) -> RegisterEventHandler:
+    """Fire start_following `timeout` seconds after `node` itself was started."""
+    return RegisterEventHandler(OnProcessStart(
+        target_action=node,
+        on_start=lambda *_args: [TimerAction(
+            period=timeout,
+            actions=[OpaqueFunction(function=lambda _context: start_following())],
+        )],
+    ))
+
+
 def _build_camera_nodes(context):
     params_file = LaunchConfiguration("params_file").perform(context)
     cameras_file = LaunchConfiguration("cameras_file").perform(context)
@@ -408,7 +472,15 @@ def _build_camera_nodes(context):
     ptp_action_sender_start_delay = float(
         LaunchConfiguration("ptp_action_sender_start_delay").perform(context)
     )
+    sequential_start = _parse_bool(LaunchConfiguration("sequential_start").perform(context))
+    sequential_start_timeout = float(
+        LaunchConfiguration("sequential_start_timeout").perform(context)
+    )
     ptp_master_interface = LaunchConfiguration("ptp_master_interface").perform(context)
+    # `ros2 launch` rejects an empty value ("ptp_master_interface:="), so callers that
+    # want no ptp4l pass one of these instead.
+    if ptp_master_interface.strip().lower() in ("", "none", "off", "false", "-"):
+        ptp_master_interface = ""
     force_ip_in_camera_nodes = _parse_bool(
         LaunchConfiguration("force_ip_in_camera_nodes").perform(context)
     )
@@ -515,6 +587,15 @@ def _build_camera_nodes(context):
            if _is_master(c) and not _is_ptp_action_sender(c)]
         + [(c, shared_parameters) for c in cameras if _is_ptp_action_sender(c)]
     )
+
+    if sequential_start:
+        nodes.extend(_chain_camera_nodes(
+            [_build_camera_node(camera, camera_parameters, camera_info_yaml_path,
+                                force_ip_in_camera_nodes)
+             for camera, camera_parameters in ordered_cameras],
+            sequential_start_timeout,
+        ))
+        return nodes
 
     for index, (camera, camera_parameters) in enumerate(ordered_cameras):
         node = _build_camera_node(
@@ -681,6 +762,24 @@ def generate_launch_description():
                     "Read/Write access to one controller at a time, so simultaneous starts "
                     "contend for it; the nodes retry Init() and recover on their own, which is "
                     "why this is 0 by default. Raise it to serialize the bring-up instead."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "sequential_start",
+                default_value="false",
+                description=(
+                    "Start each camera node only after the previous one logs 'Camera "
+                    "acquisition started' (or exits, or sequential_start_timeout passes). "
+                    "Replaces camera_start_stagger. Slower (each node enumerates the whole "
+                    "rig, ~13 s with 15 cameras) but no two nodes contend for a camera."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "sequential_start_timeout",
+                default_value="45.0",
+                description=(
+                    "With sequential_start, seconds to wait for a camera node before starting "
+                    "the next one anyway (0 disables). Covers enumeration plus the Init() retries."
                 ),
             ),
             DeclareLaunchArgument(

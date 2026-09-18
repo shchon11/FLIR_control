@@ -64,6 +64,7 @@ python3 scripts/multicam_param_set.py camera.ExposureAuto Off
 
 - `/image_raw`는 raw/mono/Bayer 경로다.
 - `/image_rgb/compressed`는 카메라 내부 압축이 아니라 host에서 RGB 변환 후 JPEG/PNG 압축한 결과다.
+  기본(`rgb_encoder: gpu`)은 이 디모자이킹 + JPEG 을 **GPU** 가 한다 — 아래 "GPU 인코딩".
 - `/camera_info`는 YAML에서 읽은 calibration 값을 반영할 수 있다.
 - `header.stamp`는 기본적으로 host 수신 시각을 쓴다.
 - 원본 장치 timestamp는 `/image_raw/metadata.camera_timestamp_ns`에 남는다.
@@ -91,7 +92,39 @@ python3 scripts/multicam_param_set.py camera.ExposureAuto Off
 - `rgb_compression_format`
 - `rgb_jpeg_quality`
 - `rgb_png_compression_level`
+- `rgb_encoder` / `gpu_demosaic` / `gpu_device`
+- `camera.GevSCPSPacketSize` (점보 프레임 9000 — NIC MTU 와 짝)
 - `camera_info.yaml_path`
+
+## GPU 인코딩
+
+`image_rgb/compressed` 의 디모자이킹(NPP `CFAToRGB`)과 JPEG 인코딩(nvJPEG)을 GPU 에서 한다
+(`src/gpu_jpeg_encoder.cpp`). 카메라 14대 × 30 Hz 에서는 이 두 일이 수신 스레드의 CPU 를 거의 다 먹었다.
+
+| 파라미터 | 기본값 | 뜻 |
+|---|---|---|
+| `rgb_encoder` | `gpu` (`flir_camera.yaml`) · 노드 기본 `cpu` | `gpu` 면 GPU 로, 못 쓰면 경고를 찍고 CPU 로 |
+| `gpu_demosaic` | `true` | `false` 면 디모자이킹은 CPU(`color_processing`), JPEG 만 GPU |
+| `gpu_device` | `0` | CUDA 장치 번호 |
+
+2026-09-19 실측 (가시광 14 + 열화상 2, 30 Hz, 점보 프레임): CPU 유휴 25% → 77%, 카메라 노드 하나 98% → 17%,
+16대 다 뜨기까지(3초 간격) 112초 → 52초, GPU 메모리 노드당 약 310 MiB (합 약 5 GB). 색 · JPEG 크기는 CPU 와 같다.
+PNG 는 GPU 경로가 없다 (CPU 로 간다).
+
+**빌드** — CUDA *라이브러리*만 있으면 된다 (nvcc · sudo 불필요). NVIDIA 의 pip 배포본을 리포의
+`third_party/cuda12` (git 무시)에 푼다:
+
+```bash
+pip3 install --no-deps --target third_party/cuda12 \
+  nvidia-cuda-runtime-cu12 nvidia-nvjpeg-cu12 nvidia-npp-cu12
+# cuda_runtime_api.h 가 include 하는 crt/ 헤더는 nvcc 배포본에만 있다 — 그것만 따로 옮긴다
+pip3 install --no-deps --target /tmp/nvcc nvidia-cuda-nvcc-cu12 && mv /tmp/nvcc/nvidia/cuda_nvcc third_party/cuda12/nvidia/
+colcon build --symlink-install --packages-select flir_spinnaker_camera
+```
+
+CMake 는 `FLIR_CUDA_ROOT`(기본 `third_party/cuda12`) → `/usr/local/cuda` 순으로 찾고, 없으면 예전처럼 CPU 만으로
+빌드된다. 라이브러리 경로는 Spinnaker 뒤에 RPATH 로 들어간다 (Spinnaker 가 앞이어야 하는 이유는 CMakeLists 주석).
+드라이버는 CUDA 12 를 지원하면 된다 (이 PC: 595, CUDA 13.2).
 
 ## calibration 적용
 

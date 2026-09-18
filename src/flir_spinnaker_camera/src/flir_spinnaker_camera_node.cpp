@@ -37,6 +37,10 @@
 #include "sensor_msgs/image_encodings.hpp"
 #include "sensor_msgs/msg/image.hpp"
 
+#ifdef FLIR_HAVE_GPU_JPEG
+#include "gpu_jpeg_encoder.hpp"
+#endif
+
 namespace
 {
 
@@ -724,7 +728,12 @@ public:
     color_processing_(declare_parameter<std::string>("color_processing", "hq_linear")),
     rgb_compression_format_(declare_parameter<std::string>("rgb_compression_format", "jpeg")),
     rgb_jpeg_quality_(declare_parameter<int>("rgb_jpeg_quality", 90)),
-    rgb_png_compression_level_(declare_parameter<int>("rgb_png_compression_level", 3))
+    rgb_png_compression_level_(declare_parameter<int>("rgb_png_compression_level", 3)),
+    // "gpu": demosaic + JPEG on the GPU (nvJPEG/NPP) instead of the acquisition
+    // thread; falls back to the CPU path if the GPU is unavailable.
+    rgb_encoder_(declare_parameter<std::string>("rgb_encoder", "cpu")),
+    gpu_demosaic_(declare_parameter<bool>("gpu_demosaic", true)),
+    gpu_device_(declare_parameter<int>("gpu_device", 0))
   {
     if (!publish_raw_ && !publish_camera_info_ && !publish_metadata_ && !publish_rgb_compressed_) {
       throw std::runtime_error(
@@ -808,6 +817,7 @@ public:
     rgb_compression_format_ = NormalizeCompressionFormat(rgb_compression_format_);
     pixel_format_ = NormalizePixelFormatParameter(pixel_format_);
     image_processor_.SetColorProcessing(ParseColorProcessing(color_processing_));
+    InitializeGpuEncoder();
 
     camera_info_distortion_model_ = declare_parameter<std::string>(
       "camera_info.distortion_model",
@@ -3113,6 +3123,101 @@ private:
     return rgb_compression_format_ == "png" ? "png" : "jpeg";
   }
 
+  void InitializeGpuEncoder()
+  {
+    if (!publish_rgb_compressed_ || NormalizeName(rgb_encoder_) != "gpu") {
+      return;
+    }
+    if (rgb_compression_format_ != "jpeg") {
+      RCLCPP_WARN(get_logger(), "rgb_encoder=gpu only encodes JPEG; using the CPU for %s.",
+        rgb_compression_format_.c_str());
+      return;
+    }
+#ifdef FLIR_HAVE_GPU_JPEG
+    auto encoder = std::make_unique<flir_gpu::GpuJpegEncoder>();
+    std::string error;
+    if (!encoder->Init(gpu_device_, std::clamp(rgb_jpeg_quality_, 1, 100), &error)) {
+      RCLCPP_WARN(get_logger(), "GPU JPEG encoder unavailable (%s); using the CPU.", error.c_str());
+      return;
+    }
+    RCLCPP_INFO(
+      get_logger(), "RGB compressed on GPU %d: %s, demosaic on %s", gpu_device_,
+      encoder->Describe().c_str(), gpu_demosaic_ ? "GPU (NPP)" : ("CPU (" + color_processing_ + ")").c_str());
+    gpu_encoder_ = std::move(encoder);
+#else
+    RCLCPP_WARN(get_logger(),
+      "rgb_encoder=gpu but this build has no GPU JPEG support (CUDA libraries not found at build "
+      "time); using the CPU.");
+#endif
+  }
+
+#ifdef FLIR_HAVE_GPU_JPEG
+  static bool BayerPatternOf(Spinnaker::PixelFormatEnums format, flir_gpu::BayerPattern * pattern)
+  {
+    switch (format) {
+      case Spinnaker::PixelFormat_BayerRG8: *pattern = flir_gpu::BayerPattern::kRGGB; return true;
+      case Spinnaker::PixelFormat_BayerBG8: *pattern = flir_gpu::BayerPattern::kBGGR; return true;
+      case Spinnaker::PixelFormat_BayerGR8: *pattern = flir_gpu::BayerPattern::kGRBG; return true;
+      case Spinnaker::PixelFormat_BayerGB8: *pattern = flir_gpu::BayerPattern::kGBRG; return true;
+      default: return false;
+    }
+  }
+#endif
+
+  // GPU path for image_rgb/compressed. Returns false when the frame must go the CPU
+  // way (no GPU encoder, unsupported format, or a GPU error).
+  bool TryGpuCompressed(
+    const ImagePtr & image, const rclcpp::Time & stamp,
+    sensor_msgs::msg::CompressedImage & msg)
+  {
+#ifdef FLIR_HAVE_GPU_JPEG
+    if (!gpu_encoder_) {
+      return false;
+    }
+    const int width = static_cast<int>(image->GetWidth());
+    const int height = static_cast<int>(image->GetHeight());
+    std::vector<std::uint8_t> jpeg;
+    std::string error;
+    bool ok = false;
+    flir_gpu::BayerPattern pattern;
+    if (gpu_demosaic_ && BayerPatternOf(image->GetPixelFormat(), &pattern)) {
+      const int stride = image->GetStride() ? static_cast<int>(image->GetStride()) : width;
+      ok = gpu_encoder_->EncodeBayer8(
+        static_cast<const std::uint8_t *>(image->GetData()), width, height, stride, pattern, jpeg, &error);
+    } else {
+      ImagePtr rgb = image;
+      if (image->GetPixelFormat() != Spinnaker::PixelFormat_RGB8 &&
+        image->GetPixelFormat() != Spinnaker::PixelFormat_RGB8Packed)
+      {
+        rgb = image_processor_.Convert(image, Spinnaker::PixelFormat_RGB8);
+      }
+      const int stride = rgb->GetStride() ? static_cast<int>(rgb->GetStride()) : width * 3;
+      ok = gpu_encoder_->EncodeRgb8(
+        static_cast<const std::uint8_t *>(rgb->GetData()), width, height, stride, jpeg, &error);
+    }
+    if (!ok) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, "GPU JPEG failed: %s", error.c_str());
+      if (++gpu_failures_ >= 30) {
+        RCLCPP_ERROR(get_logger(), "GPU JPEG failed %d times; switching to the CPU encoder.",
+          gpu_failures_);
+        gpu_encoder_.reset();
+      }
+      return false;
+    }
+    gpu_failures_ = 0;
+    msg.header.stamp = stamp;
+    msg.header.frame_id = frame_id_;
+    msg.format = CompressedFormatString();
+    msg.data = std::move(jpeg);
+    return true;
+#else
+    (void)image;
+    (void)stamp;
+    (void)msg;
+    return false;
+#endif
+  }
+
   sensor_msgs::msg::CompressedImage BuildCompressedImageMessage(
     const ImagePtr & rgb_image,
     const rclcpp::Time & stamp) const
@@ -3297,7 +3402,10 @@ private:
           }
         }
 
-        if (publish_rgb_compressed_) {
+        sensor_msgs::msg::CompressedImage gpu_msg;
+        if (publish_rgb_compressed_ && TryGpuCompressed(image, stamp, gpu_msg)) {
+          rgb_compressed_pub_->publish(std::move(gpu_msg));
+        } else if (publish_rgb_compressed_) {
           ImagePtr rgb_image = image;
           if (image->GetPixelFormat() != Spinnaker::PixelFormat_RGB8 &&
             image->GetPixelFormat() != Spinnaker::PixelFormat_RGB8Packed)
@@ -3455,6 +3563,13 @@ private:
   std::string rgb_compression_format_;
   int rgb_jpeg_quality_;
   int rgb_png_compression_level_;
+  std::string rgb_encoder_;
+  bool gpu_demosaic_;
+  int gpu_device_;
+  int gpu_failures_ = 0;
+#ifdef FLIR_HAVE_GPU_JPEG
+  std::unique_ptr<flir_gpu::GpuJpegEncoder> gpu_encoder_;
+#endif
   bool camera_timestamp_alignment_initialized_ = false;
   bool camera_timestamp_header_disabled_due_to_instability_ = false;
   std::uint64_t last_camera_timestamp_ns_ = 0U;

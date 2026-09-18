@@ -29,7 +29,17 @@ flir_camera:
     # Mono16 carries the full 16-bit thermal value; Mono8 is display-scaled only.
     auto_pixel_format: false
     pixel_format: "Mono16"
-    buffer_handling_mode: "NewestOnly"
+    # OldestFirst, not NewestOnly (unlike the Blackflies). The A70 captures every
+    # 33.0 ms but sends frames in bunches: measured 2026-09-19, host arrival gaps
+    # ranged 1.9-140 ms (33 of 451 frames within 10 ms of the previous one). With
+    # NewestOnly, whenever two or more frames are waiting when the node asks, all
+    # but the newest are dropped without any warning: 4-7% of frames lost with one
+    # A70 alone, 14-22% with the whole rig running (the node gets to the buffer a
+    # little later). OldestFirst: 0% in both. The node keeps up easily (~10% of a
+    # core), so the queue never grows beyond a bunch; header.stamp is host receive
+    # time either way, so it carries that arrival jitter (the regular capture time is
+    # in image_raw/metadata.camera_timestamp_ns).
+    buffer_handling_mode: "OldestFirst"
     color_processing: "hq_linear"
 
     publish_raw: true
@@ -115,7 +125,8 @@ flir_camera:
     # GigE transport
     # --------------------------------------------------------------------------
     # 640x480x2 B x 30 Hz = ~18 MB/s, so no bandwidth limiting is needed.
-    # Keep packets below the 1500 MTU like the visible cameras.
+    # 1400 even though the camera NIC now runs jumbo frames: the A70 ignores 9000
+    # (packet rate stayed ~13.6k/s in a 2026-09-19 test), and at 18 MB/s it doesn't matter.
     camera.GevSCPSPacketSize: 1400
 
     stream.StreamBufferCountMode: "Manual"

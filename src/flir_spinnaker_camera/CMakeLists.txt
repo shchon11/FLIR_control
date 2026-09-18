@@ -90,6 +90,57 @@ add_executable(flir_multicam_inventory_tool
   src/flir_multicam_inventory_tool.cpp
 )
 
+# ---- GPU JPEG encoder (optional) ----
+# image_rgb/compressed can be demosaiced (NPP) and JPEG-encoded (nvJPEG) on the
+# GPU instead of the acquisition thread; see src/gpu_jpeg_encoder.hpp. Only
+# CUDA *libraries* are needed (no nvcc): a CUDA toolkit, or NVIDIA's pip wheels
+# unpacked without sudo into third_party/cuda12:
+#   pip3 install --no-deps --target third_party/cuda12 \
+#     nvidia-cuda-runtime-cu12 nvidia-nvjpeg-cu12 nvidia-npp-cu12 nvidia-cuda-nvcc-cu12
+# (the nvcc wheel only for its crt/ headers, which cuda_runtime_api.h includes)
+# Without them the node builds exactly as before (CPU path only).
+set(FLIR_CUDA_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/cuda12"
+  CACHE PATH "Directory holding nvidia/{cuda_runtime,nvjpeg,npp} (pip wheels)")
+option(FLIR_WITH_GPU_JPEG "Build the nvJPEG/NPP encoder when the libraries are found" ON)
+set(_cuda_hints
+  "${FLIR_CUDA_ROOT}/nvidia/cuda_runtime"
+  "${FLIR_CUDA_ROOT}/nvidia/nvjpeg"
+  "${FLIR_CUDA_ROOT}/nvidia/npp"
+  /usr/local/cuda
+)
+find_path(FLIR_CUDART_INCLUDE_DIR cuda_runtime_api.h HINTS ${_cuda_hints} PATH_SUFFIXES include)
+find_path(FLIR_NVJPEG_INCLUDE_DIR nvjpeg.h HINTS ${_cuda_hints} PATH_SUFFIXES include)
+find_path(FLIR_NPP_INCLUDE_DIR nppi_color_conversion.h HINTS ${_cuda_hints} PATH_SUFFIXES include)
+find_path(FLIR_CUDA_CRT_INCLUDE_DIR crt/host_defines.h
+  HINTS ${_cuda_hints} "${FLIR_CUDA_ROOT}/nvidia/cuda_nvcc" PATH_SUFFIXES include)
+find_library(FLIR_CUDART_LIBRARY NAMES cudart libcudart.so.12
+  HINTS ${_cuda_hints} PATH_SUFFIXES lib lib64)
+find_library(FLIR_NVJPEG_LIBRARY NAMES nvjpeg libnvjpeg.so.12
+  HINTS ${_cuda_hints} PATH_SUFFIXES lib lib64)
+find_library(FLIR_NPPICC_LIBRARY NAMES nppicc libnppicc.so.12
+  HINTS ${_cuda_hints} PATH_SUFFIXES lib lib64)
+find_library(FLIR_NPPC_LIBRARY NAMES nppc libnppc.so.12
+  HINTS ${_cuda_hints} PATH_SUFFIXES lib lib64)
+
+set(_node_rpath ${SPINNAKER_LIBRARY_DIR})
+if(FLIR_WITH_GPU_JPEG AND FLIR_CUDART_INCLUDE_DIR AND FLIR_NVJPEG_INCLUDE_DIR AND FLIR_NPP_INCLUDE_DIR
+    AND FLIR_CUDA_CRT_INCLUDE_DIR AND FLIR_CUDART_LIBRARY AND FLIR_NVJPEG_LIBRARY AND FLIR_NPPICC_LIBRARY AND FLIR_NPPC_LIBRARY)
+  target_sources(flir_spinnaker_camera_node PRIVATE src/gpu_jpeg_encoder.cpp)
+  target_compile_definitions(flir_spinnaker_camera_node PRIVATE FLIR_HAVE_GPU_JPEG=1)
+  target_include_directories(flir_spinnaker_camera_node SYSTEM PRIVATE
+    ${FLIR_CUDART_INCLUDE_DIR} ${FLIR_CUDA_CRT_INCLUDE_DIR} ${FLIR_NVJPEG_INCLUDE_DIR} ${FLIR_NPP_INCLUDE_DIR})
+  target_link_libraries(flir_spinnaker_camera_node
+    ${FLIR_NVJPEG_LIBRARY} ${FLIR_NPPICC_LIBRARY} ${FLIR_NPPC_LIBRARY} ${FLIR_CUDART_LIBRARY})
+  foreach(_lib ${FLIR_CUDART_LIBRARY} ${FLIR_NVJPEG_LIBRARY} ${FLIR_NPPICC_LIBRARY})
+    get_filename_component(_dir ${_lib} DIRECTORY)
+    list(APPEND _node_rpath ${_dir})
+  endforeach()
+  list(REMOVE_DUPLICATES _node_rpath)
+  message(STATUS "GPU JPEG encoder: ON (${FLIR_NVJPEG_LIBRARY})")
+else()
+  message(STATUS "GPU JPEG encoder: OFF (CUDA runtime / nvJPEG / NPP not found; see FLIR_CUDA_ROOT)")
+endif()
+
 target_compile_features(flir_spinnaker_camera_node PUBLIC cxx_std_17)
 target_compile_features(flir_camera_extrinsics_tf_node PUBLIC cxx_std_17)
 target_compile_features(flir_multicam_inventory_tool PUBLIC cxx_std_17)
@@ -121,9 +172,10 @@ target_link_libraries(flir_multicam_inventory_tool
 # /opt/ros/humble/lib (which may hold a different vendored libSpinnaker) on
 # LD_LIBRARY_PATH. Without this, SPINNAKER_LIBRARY_DIR loses at runtime even
 # when it wins at link time.
+# Spinnaker stays first on the RPATH (see above); the CUDA library dirs follow.
 set_target_properties(flir_spinnaker_camera_node PROPERTIES
-  BUILD_RPATH ${SPINNAKER_LIBRARY_DIR}
-  INSTALL_RPATH ${SPINNAKER_LIBRARY_DIR}
+  BUILD_RPATH "${_node_rpath}"
+  INSTALL_RPATH "${_node_rpath}"
   LINK_FLAGS "-Wl,--disable-new-dtags"
 )
 

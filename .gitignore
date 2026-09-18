@@ -52,3 +52,4 @@ image_dumps/
 # so launching from the repo root drops one here. The bag carries the same data
 # on /ouster/metadata, so the loose file is disposable.
 *-metadata.json
+third_party/

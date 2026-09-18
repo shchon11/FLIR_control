@@ -28,7 +28,7 @@ ros2 launch flir_camera_undistort_viewer undistort_viewer.launch.py
 
 There is no test suite, no linter config, and no CI. `colcon build` compiling cleanly is the only build gate. The C++ builds with `-Wall -Wextra -Wpedantic`.
 
-Requires the Spinnaker SDK 4.x installed separately (not via rosdep/pip). If it is not at `/opt/spinnaker`, `export SPINNAKER_ROOT=/path/to/spinnaker` before building.
+Requires the Spinnaker SDK 4.x installed separately (not via rosdep/pip). The optional GPU JPEG path needs CUDA *libraries* only (no nvcc/sudo): NVIDIA's pip wheels unpacked into the gitignored `third_party/cuda12` (`pip3 install --no-deps --target third_party/cuda12 nvidia-cuda-runtime-cu12 nvidia-nvjpeg-cu12 nvidia-npp-cu12 nvidia-cuda-nvcc-cu12`); without them the node builds CPU-only. CMake prints `GPU JPEG encoder: ON/OFF`. If it is not at `/opt/spinnaker`, `export SPINNAKER_ROOT=/path/to/spinnaker` before building.
 
 ## Two kinds of executables
 
@@ -63,7 +63,7 @@ flir_spinnaker_camera ──> flir_camera_undistort_viewer
 
 - **`src/flir_spinnaker_camera/config/multicam_cameras.yaml` is the single source of truth for the rig.** It maps each camera by **serial** to a position-based **namespace** (`camera_center`, `camera_front_right`, …), `frame_id`, `force_ip_address`, `mac_address`, and per-camera sync roles. The multicam launch files in *all three* packages read this same file, so adding/replacing a camera means editing this YAML (serials change with hardware). Do not hardcode the 8-camera list elsewhere — the README/docs tables are copies for humans; this YAML wins.
 
-- **Thermal cameras (FLIR A70) have their own inventory and params:** `config/multicam_thermal_cameras.yaml` + `config/thermal_camera.yaml`, namespaces `thermalN`, IPs from `192.168.1.11`. `multicam.launch.py` launches them alongside the Blackflies (`enable_thermal_cameras`/`enable_visible_cameras`). The two inventory updates exclude each other by model (`thermal_model_patterns`) and serial, so an A70 never lands in `multicam_cameras.yaml` with a PTP action role. A70 has no FrameStart trigger, no Action command, and its PTP (`PtpEnable`/`PtpStatus`, no `GevIEEE1588*`) did not reach Slave against ptp4l, so it free-runs with host-arrival stamps. Output is `image_raw` mono16 where value × 0.01 = Kelvin.
+- **Thermal cameras (FLIR A70) have their own inventory and params:** `config/multicam_thermal_cameras.yaml` + `config/thermal_camera.yaml`, namespaces `thermalN`, IPs from `192.168.1.11`. `multicam.launch.py` launches them alongside the Blackflies (`enable_thermal_cameras`/`enable_visible_cameras`). The two inventory updates exclude each other by model (`thermal_model_patterns`) and serial, so an A70 never lands in `multicam_cameras.yaml` with a PTP action role. A70 has no FrameStart trigger, no Action command, and its PTP (`PtpEnable`/`PtpStatus`, no `GevIEEE1588*`) did not reach Slave against ptp4l, so it free-runs with host-arrival stamps. Output is `image_raw` mono16 where value × 0.01 = Kelvin. It sends frames in bunches (host arrival gaps 2–140 ms at a steady 33 ms capture), so its `buffer_handling_mode` is `OldestFirst`: `NewestOnly` silently dropped 4–22% of A70 frames.
 
 - **Two mutually-exclusive frame-sync mechanisms**, both selected per-camera in `multicam_cameras.yaml`:
   - GPIO hardware trigger: `hardware_trigger_role: master|slave|none` (needs the physical trigger cable).
@@ -71,7 +71,7 @@ flir_spinnaker_camera ──> flir_camera_undistort_viewer
 
 - **Calibration is a round trip.** `flir_camera_calibration` writes `calibration/*.yaml`; the camera node reads intrinsics back via `camera_info.yaml_path` and the TF node reads extrinsics. The `calibration/` YAMLs are committed; `calibration/captures/`, `bags/`, and `nuscenes_export/` are gitignored.
 
-- **Debayering runs on the host and is the tightest CPU budget** (8 cams × 30 Hz × 1920×1200). `color_processing: ipp` is a deliberate choice — `hq_linear` overran the per-frame budget and silently dropped frames under `NewestOnly`. See the long comment in `flir_camera.yaml`; do not casually change `color_processing`, `buffer_handling_mode`, or `pixel_format`.
+- **Debayering runs on the host and is the tightest CPU budget** (8 cams × 30 Hz × 1920×1200). `color_processing: ipp` is a deliberate choice — `hq_linear` overran the per-frame budget and silently dropped frames under `NewestOnly`. See the long comment in `flir_camera.yaml`; do not casually change `color_processing`, `buffer_handling_mode`, or `pixel_format`. Since 2026-09-19 `rgb_encoder: gpu` (default in `flir_camera.yaml`) moves demosaic + JPEG to the GPU (`src/gpu_jpeg_encoder.cpp`, NPP + nvJPEG; ~5x less CPU per camera node), so `color_processing` only matters on the CPU fallback path (`gpu_demosaic: false`, or a build without the CUDA libraries).
 
 - **Timestamps:** `header.stamp` is host *arrival* time by default (`use_camera_timestamp_in_header: false`); the true device/PTP timestamp survives only in `image_raw/metadata.camera_timestamp_ns`.
 
@@ -89,4 +89,4 @@ flir_spinnaker_camera ──> flir_camera_undistort_viewer
 
 ## Network / NIC setup
 
-The camera network is isolated from the internet (see `docs/network_layout.md` for the measured layout — camera NIC, host IP `192.168.1.100/24`, cameras `.1`–`.8`, MTU 1500). Host RX tuning and NIC/PTP capabilities are applied by `scripts/setup_camera_nic.bash` and persisted across reboots by `scripts/flir-camera-nic.service`. The camera NIC host IP must not be a subnet network/broadcast address (e.g. use `.10`/`.100`, not `.0`).
+The camera network is isolated from the internet (see `docs/network_layout.md` for the measured layout — camera NIC, host IP `192.168.1.100/24`, cameras `.1`–`.8`). The camera NIC runs jumbo frames (MTU 9000, set in the NetworkManager profile `FLIR-LAN`, not by the setup script) and `camera.GevSCPSPacketSize` is 9000 to match — revert both together. Host RX tuning and NIC/PTP capabilities are applied by `scripts/setup_camera_nic.bash` and persisted across reboots by `scripts/flir-camera-nic.service`. The camera NIC host IP must not be a subnet network/broadcast address (e.g. use `.10`/`.100`, not `.0`).

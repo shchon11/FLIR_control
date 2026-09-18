@@ -63,6 +63,16 @@ flir_camera:
     # bilinear, so it wins. Options: nearest_neighbor, nearest_neighbor_avg,
     # bilinear, edge_sensing, ipp, directional_filter, rigorous, hq_linear.
     color_processing: "ipp"
+    # Demosaic + JPEG for image_rgb/compressed on the GPU instead of the acquisition
+    # thread (NPP CFAToRGB + nvJPEG; see src/gpu_jpeg_encoder.hpp). Measured
+    # 2026-09-19, 14 BFS + 2 A70 at 30 Hz with jumbo frames: CPU idle 25% -> 77%,
+    # one camera node 98% -> 17% of a core, all 16 nodes up (3 s stagger) 112 s -> 52 s,
+    # ~5 GB of GPU memory in total (~310 MiB per node). Same colors and JPEG size
+    # as the CPU path. gpu_demosaic: false keeps the CPU demosaic (color_processing
+    # above) and moves only the JPEG (node ~36%). Falls back to the CPU by itself
+    # when the node was built without the CUDA libraries or the GPU is unavailable.
+    rgb_encoder: "gpu"
+    gpu_demosaic: true
 
     # Topic output control
     # - publish_raw:
@@ -327,10 +337,13 @@ flir_camera:
     # drops every packet as over-length (visible as rx_long_length_errors in
     # `ethtool -S`) and no frame ever completes. Cameras persist this value in
     # flash, so leaving it unset means inheriting whatever SpinView last wrote.
-    # 1400 is safe on a 1500-MTU path. With jumbo frames enabled end to end
-    # (NIC and switch at MTU 9000) raise this to 9000: it cuts the packet rate
-    # ~6x, which matters a lot with eight cameras on one link.
-    camera.GevSCPSPacketSize: 1400
+    # 1400 is safe on a 1500-MTU path. The camera NIC (enp3s0f1, NetworkManager
+    # profile FLIR-LAN) and the switch run jumbo frames since 2026-09-19 (MTU 9000),
+    # so 9000 here: with 14 cameras at 30 Hz the kernel took ~745k packets/s at
+    # 1400 B and spent ~36% of all CPU receiving them; at 9000 B it is ~140k/s and
+    # frame loss went from 21.5% to 0. If the NIC is ever back at MTU 1500, set
+    # this to 1400 again or no frame completes.
+    camera.GevSCPSPacketSize: 9000
     # Inter-packet delay in ticks. Raise it if the switch drops packets when all
     # eight cameras burst at once.
     camera.GevSCPD: 0
