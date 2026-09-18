@@ -90,7 +90,11 @@ def _append_optional_cli_arg(command: list, option_name: str, value: str) -> Non
         command.extend([option_name, value])
 
 
-def _run_camera_inventory_update(context, cameras_file: str) -> None:
+def _split_csv(value: str) -> list:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _run_camera_inventory_update(context, cameras_file: str, thermal_cameras_file: str) -> None:
     if not _parse_bool(LaunchConfiguration("auto_update_cameras_file").perform(context)):
         return
 
@@ -102,20 +106,16 @@ def _run_camera_inventory_update(context, cameras_file: str) -> None:
         "--output",
         cameras_file,
     ]
-    _append_optional_cli_arg(
+    # Thermal cameras live in their own inventory and must not pick up visible-camera
+    # ForceIP / PTP action roles.
+    for pattern in _split_csv(LaunchConfiguration("thermal_model_patterns").perform(context)):
+        command.extend(["--exclude-model", pattern])
+    if thermal_cameras_file and os.path.isfile(thermal_cameras_file):
+        command.extend(["--exclude-cameras-file", thermal_cameras_file])
+    _append_force_ip_cli_args(
+        context,
         command,
-        "--force-ip-base",
         LaunchConfiguration("auto_update_force_ip_base").perform(context),
-    )
-    _append_optional_cli_arg(
-        command,
-        "--force-ip-subnet-mask",
-        LaunchConfiguration("auto_update_force_ip_subnet_mask").perform(context),
-    )
-    _append_optional_cli_arg(
-        command,
-        "--force-ip-gateway",
-        LaunchConfiguration("auto_update_force_ip_gateway").perform(context),
     )
     _append_optional_cli_arg(
         command,
@@ -132,24 +132,81 @@ def _run_camera_inventory_update(context, cameras_file: str) -> None:
         command.append("--first-camera-ptp-sender")
     if _parse_bool(LaunchConfiguration("auto_update_drop_missing").perform(context)):
         command.append("--drop-missing")
-    if _parse_bool(LaunchConfiguration("auto_apply_force_ip").perform(context)):
-        command.append("--apply-force-ip")
-        command.extend(
-            [
-                "--force-ip-wait-after-ms",
-                LaunchConfiguration("auto_force_ip_wait_after_ms").perform(context),
-                "--force-ip-rediscovery-timeout-ms",
-                LaunchConfiguration("auto_force_ip_rediscovery_timeout_ms").perform(context),
-                "--force-ip-max-attempts",
-                LaunchConfiguration("auto_force_ip_max_attempts").perform(context),
-            ]
-        )
+    _append_apply_force_ip_cli_args(context, command)
 
     result = subprocess.run(command, check=False)
     if result.returncode != 0:
         raise RuntimeError(
             "Failed to auto-update camera inventory YAML. "
             f"Command exited with code {result.returncode}: {' '.join(command)}"
+        )
+
+
+def _append_force_ip_cli_args(context, command: list, force_ip_base: str) -> None:
+    _append_optional_cli_arg(command, "--force-ip-base", force_ip_base)
+    _append_optional_cli_arg(
+        command,
+        "--force-ip-subnet-mask",
+        LaunchConfiguration("auto_update_force_ip_subnet_mask").perform(context),
+    )
+    _append_optional_cli_arg(
+        command,
+        "--force-ip-gateway",
+        LaunchConfiguration("auto_update_force_ip_gateway").perform(context),
+    )
+
+
+def _append_apply_force_ip_cli_args(context, command: list) -> None:
+    if not _parse_bool(LaunchConfiguration("auto_apply_force_ip").perform(context)):
+        return
+    command.append("--apply-force-ip")
+    command.extend(
+        [
+            "--force-ip-wait-after-ms",
+            LaunchConfiguration("auto_force_ip_wait_after_ms").perform(context),
+            "--force-ip-rediscovery-timeout-ms",
+            LaunchConfiguration("auto_force_ip_rediscovery_timeout_ms").perform(context),
+            "--force-ip-max-attempts",
+            LaunchConfiguration("auto_force_ip_max_attempts").perform(context),
+        ]
+    )
+
+
+def _run_thermal_inventory_update(context, thermal_cameras_file: str, cameras_file: str) -> None:
+    if not _parse_bool(LaunchConfiguration("auto_update_thermal_cameras_file").perform(context)):
+        return
+
+    patterns = _split_csv(LaunchConfiguration("thermal_model_patterns").perform(context))
+    if not patterns:
+        return
+
+    command = [
+        "ros2",
+        "run",
+        "flir_spinnaker_camera",
+        "flir_multicam_inventory_tool",
+        "--output",
+        thermal_cameras_file,
+        "--name-prefix",
+        "thermal",
+    ]
+    for pattern in patterns:
+        command.extend(["--include-model", pattern])
+    if cameras_file and os.path.isfile(cameras_file):
+        command.extend(["--exclude-cameras-file", cameras_file])
+    _append_force_ip_cli_args(
+        context,
+        command,
+        LaunchConfiguration("thermal_force_ip_base").perform(context),
+    )
+    _append_apply_force_ip_cli_args(context, command)
+
+    # A missing or unreachable thermal camera must not take the visible rig down with it.
+    result = subprocess.run(command, check=False)
+    if result.returncode != 0:
+        print(
+            "[multicam.launch] WARNING: thermal camera inventory update failed "
+            f"(exit {result.returncode}); launching thermal cameras from the existing file."
         )
 
 
@@ -381,9 +438,31 @@ def _build_camera_nodes(context):
             output="screen",
         )
 
-    _run_camera_inventory_update(context, cameras_file)
-    cameras = _parse_cameras_file(cameras_file)
-    shared_parameters = _load_ros_parameters(params_file, "flir_camera")
+    enable_visible_cameras = _parse_bool(
+        LaunchConfiguration("enable_visible_cameras").perform(context)
+    )
+    enable_thermal_cameras = _parse_bool(
+        LaunchConfiguration("enable_thermal_cameras").perform(context)
+    )
+    thermal_cameras_file = LaunchConfiguration("thermal_cameras_file").perform(context)
+    thermal_params_file = LaunchConfiguration("thermal_params_file").perform(context)
+
+    cameras = []
+    shared_parameters = {}
+    if enable_visible_cameras:
+        _run_camera_inventory_update(context, cameras_file, thermal_cameras_file)
+        cameras = _parse_cameras_file(cameras_file)
+        shared_parameters = _load_ros_parameters(params_file, "flir_camera")
+
+    thermal_cameras = []
+    thermal_shared_parameters = {}
+    if enable_thermal_cameras:
+        _run_thermal_inventory_update(context, thermal_cameras_file, cameras_file)
+        if os.path.isfile(thermal_cameras_file):
+            thermal_cameras = _parse_cameras_file(thermal_cameras_file)
+            thermal_shared_parameters = _load_ros_parameters(thermal_params_file, "flir_camera")
+        else:
+            print(f"[multicam.launch] thermal_cameras_file not found, skipping: {thermal_cameras_file}")
 
     ptp_action_role_override = LaunchConfiguration("ptp_action_role_override").perform(context).strip()
     if ptp_action_role_override:
@@ -405,7 +484,9 @@ def _build_camera_nodes(context):
                 parameters=[
                     {
                         "extrinsics_yaml_path": extrinsics_yaml_path,
-                        "camera_serials": [camera["serial"] for camera in cameras],
+                        "camera_serials": [
+                            camera["serial"] for camera in cameras + thermal_cameras
+                        ],
                         "frame_prefix": extrinsics_tf_frame_prefix,
                     }
                 ],
@@ -418,16 +499,21 @@ def _build_camera_nodes(context):
     # the losers die with "Unable to set DeviceAccessStatus to Read/Write" (-1005).
     # Staggering the starts keeps only one Init() in flight at a time. Senders and
     # masters stay last so the receivers are armed before they fire.
+    # Thermal cameras (FLIR A50/A70) have no FrameStart/Action trigger, so they free-run
+    # with their own parameter file and start with the receivers.
     ordered_cameras = (
-        [c for c in cameras if not _is_ptp_action_sender(c) and not _is_master(c)]
-        + [c for c in cameras if _is_master(c) and not _is_ptp_action_sender(c)]
-        + [c for c in cameras if _is_ptp_action_sender(c)]
+        [(c, shared_parameters) for c in cameras
+         if not _is_ptp_action_sender(c) and not _is_master(c)]
+        + [(c, thermal_shared_parameters) for c in thermal_cameras]
+        + [(c, shared_parameters) for c in cameras
+           if _is_master(c) and not _is_ptp_action_sender(c)]
+        + [(c, shared_parameters) for c in cameras if _is_ptp_action_sender(c)]
     )
 
-    for index, camera in enumerate(ordered_cameras):
+    for index, (camera, camera_parameters) in enumerate(ordered_cameras):
         node = _build_camera_node(
             camera,
-            shared_parameters,
+            camera_parameters,
             camera_info_yaml_path,
             force_ip_in_camera_nodes,
         )
@@ -453,6 +539,12 @@ def generate_launch_description():
     cameras_file = PathJoinSubstitution(
         [FindPackageShare("flir_spinnaker_camera"), "config", "multicam_cameras.yaml"]
     )
+    thermal_params_file = PathJoinSubstitution(
+        [FindPackageShare("flir_spinnaker_camera"), "config", "thermal_camera.yaml"]
+    )
+    thermal_cameras_file = PathJoinSubstitution(
+        [FindPackageShare("flir_spinnaker_camera"), "config", "multicam_thermal_cameras.yaml"]
+    )
 
     return LaunchDescription(
         [
@@ -465,6 +557,41 @@ def generate_launch_description():
                 "cameras_file",
                 default_value=cameras_file,
                 description="Camera inventory YAML with name, serial, namespace, and frame_id.",
+            ),
+            DeclareLaunchArgument(
+                "enable_visible_cameras",
+                default_value="true",
+                description="Launch the visible (Blackfly) cameras listed in cameras_file.",
+            ),
+            DeclareLaunchArgument(
+                "enable_thermal_cameras",
+                default_value="true",
+                description="Launch the thermal (FLIR A50/A70) cameras listed in thermal_cameras_file.",
+            ),
+            DeclareLaunchArgument(
+                "thermal_params_file",
+                default_value=thermal_params_file,
+                description="Shared parameter file used by every thermal camera.",
+            ),
+            DeclareLaunchArgument(
+                "thermal_cameras_file",
+                default_value=thermal_cameras_file,
+                description="Thermal camera inventory YAML with name, serial, namespace, and frame_id.",
+            ),
+            DeclareLaunchArgument(
+                "thermal_model_patterns",
+                default_value="FLIR A50,FLIR A70",
+                description="Comma-separated model substrings kept out of the visible cameras_file inventory.",
+            ),
+            DeclareLaunchArgument(
+                "auto_update_thermal_cameras_file",
+                default_value="true",
+                description="Detect connected thermal cameras (thermal_model_patterns) and merge them into thermal_cameras_file.",
+            ),
+            DeclareLaunchArgument(
+                "thermal_force_ip_base",
+                default_value="192.168.1.11",
+                description="First ForceIP address assigned to newly discovered thermal cameras.",
             ),
             DeclareLaunchArgument(
                 "camera_info_yaml_path",

@@ -70,8 +70,11 @@
 | .6 | camera_side_left_1 | 25415250 |
 | .7 | camera_side_left_2 | 25415249 |
 | .8 | camera_rear | 26076003 |
+| .11 | thermal0 (FLIR A70) | 89905156 |
+| .12 | thermal1 (FLIR A70) | 89905157 |
 
-> 출처: `config/multicam_cameras.yaml`. 카메라를 교체하면 시리얼이 바뀌므로
+> 출처: `config/multicam_cameras.yaml`, thermal은 `config/multicam_thermal_cameras.yaml`.
+> A70 IP는 ForceIP 값이다. A70 MAC은 `00:40:7f:xx`(FLIR Systems). 카메라를 교체하면 시리얼이 바뀌므로
 > 이 표가 아니라 그 YAML을 기준으로 볼 것.
 
 ## 알아둘 점

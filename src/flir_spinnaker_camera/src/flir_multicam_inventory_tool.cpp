@@ -66,6 +66,10 @@ struct Options
   bool first_camera_ptp_sender{false};
   bool drop_missing{false};
   bool dry_run{false};
+  std::vector<std::string> exclude_models;
+  std::vector<std::string> include_models;
+  std::string name_prefix{"camera"};
+  std::vector<std::filesystem::path> exclude_cameras_files;
 };
 
 std::string TrimAscii(std::string value)
@@ -496,10 +500,10 @@ std::string FormatIpv4Address(std::uint32_t value)
   return stream.str();
 }
 
-std::string NextCameraName(const std::set<std::string> & used_names)
+std::string NextCameraName(const std::set<std::string> & used_names, const std::string & prefix)
 {
   for (std::size_t index = 0; index < 10000U; ++index) {
-    const std::string candidate = "camera" + std::to_string(index);
+    const std::string candidate = prefix + std::to_string(index);
     if (used_names.find(candidate) == used_names.end()) {
       return candidate;
     }
@@ -508,11 +512,14 @@ std::string NextCameraName(const std::set<std::string> & used_names)
   throw std::runtime_error("Could not allocate a camera name.");
 }
 
-void FillDefaultCameraFields(CameraEntry & entry, std::set<std::string> & used_names)
+void FillDefaultCameraFields(
+  CameraEntry & entry,
+  std::set<std::string> & used_names,
+  const std::string & name_prefix)
 {
   auto name_it = entry.values.find("name");
   if (name_it == entry.values.end() || name_it->second.empty()) {
-    const std::string name = NextCameraName(used_names);
+    const std::string name = NextCameraName(used_names, name_prefix);
     entry.values["name"] = name;
     used_names.insert(name);
   } else {
@@ -526,6 +533,42 @@ void FillDefaultCameraFields(CameraEntry & entry, std::set<std::string> & used_n
   if (entry.values.find("frame_id") == entry.values.end() || entry.values["frame_id"].empty()) {
     entry.values["frame_id"] = name + "_optical_frame";
   }
+}
+
+// Cameras owned by another inventory (e.g. thermal A70s) must not be merged into this one,
+// otherwise they inherit ForceIP / PTP action roles meant for the visible cameras.
+std::unordered_set<std::string> CollectExcludedSerials(
+  const std::vector<DetectedCamera> & detected,
+  const Options & options)
+{
+  std::unordered_set<std::string> excluded;
+  for (const auto & path : options.exclude_cameras_files) {
+    for (const auto & entry : ParseExistingCameras(path)) {
+      const auto serial_it = entry.values.find("serial");
+      if (serial_it != entry.values.end() && !serial_it->second.empty()) {
+        excluded.insert(serial_it->second);
+      }
+    }
+  }
+
+  const auto model_matches = [](const DetectedCamera & camera, const std::vector<std::string> & patterns) {
+      return std::any_of(
+        patterns.begin(),
+        patterns.end(),
+        [&](const std::string & pattern) {
+          return !pattern.empty() && camera.model.find(pattern) != std::string::npos;
+        });
+    };
+
+  for (const auto & camera : detected) {
+    if (model_matches(camera, options.exclude_models) ||
+      (!options.include_models.empty() && !model_matches(camera, options.include_models)))
+    {
+      excluded.insert(camera.serial);
+    }
+  }
+
+  return excluded;
 }
 
 std::vector<CameraEntry> MergeDetectedCameras(
@@ -548,7 +591,7 @@ std::vector<CameraEntry> MergeDetectedCameras(
     const bool is_detected = detected_serials.find(serial) != detected_serials.end();
     if (!options.drop_missing || is_detected) {
       entry.detected = is_detected;
-      FillDefaultCameraFields(entry, used_names);
+      FillDefaultCameraFields(entry, used_names, options.name_prefix);
       if (!serial.empty()) {
         included_serials.insert(serial);
       }
@@ -562,10 +605,10 @@ std::vector<CameraEntry> MergeDetectedCameras(
     }
 
     CameraEntry entry;
-    const std::string name = NextCameraName(used_names);
+    const std::string name = NextCameraName(used_names, options.name_prefix);
     entry.values["name"] = name;
     entry.values["serial"] = camera.serial;
-    FillDefaultCameraFields(entry, used_names);
+    FillDefaultCameraFields(entry, used_names, options.name_prefix);
     if (!options.new_hardware_trigger_role.empty()) {
       entry.values["hardware_trigger_role"] = options.new_hardware_trigger_role;
     }
@@ -586,12 +629,19 @@ void AssignForceIpAddresses(std::vector<CameraEntry> & cameras, const Options & 
   }
 
   std::set<std::uint32_t> used_addresses;
-  for (const auto & camera : cameras) {
-    const auto ip_it = camera.values.find("force_ip_address");
-    if (ip_it == camera.values.end() || ip_it->second.empty()) {
-      continue;
-    }
-    used_addresses.insert(ParseIpv4Address(ip_it->second, "force_ip_address"));
+  const auto collect_used = [&](const std::vector<CameraEntry> & entries) {
+      for (const auto & camera : entries) {
+        const auto ip_it = camera.values.find("force_ip_address");
+        if (ip_it == camera.values.end() || ip_it->second.empty()) {
+          continue;
+        }
+        used_addresses.insert(ParseIpv4Address(ip_it->second, "force_ip_address"));
+      }
+    };
+  collect_used(cameras);
+  // Addresses owned by the other inventory (visible <-> thermal) share the same subnet.
+  for (const auto & path : options.exclude_cameras_files) {
+    collect_used(ParseExistingCameras(path));
   }
 
   std::uint32_t next_address = ParseIpv4Address(options.force_ip_base, "--force-ip-base");
@@ -976,6 +1026,14 @@ Options ParseOptions(int argc, char ** argv)
       options.drop_missing = true;
     } else if (argument == "--dry-run") {
       options.dry_run = true;
+    } else if (argument == "--exclude-model") {
+      options.exclude_models.push_back(next_value());
+    } else if (argument == "--name-prefix") {
+      options.name_prefix = next_value();
+    } else if (argument == "--include-model") {
+      options.include_models.push_back(next_value());
+    } else if (argument == "--exclude-cameras-file") {
+      options.exclude_cameras_files.emplace_back(next_value());
     } else if (argument == "--help" || argument == "-h") {
       std::cout
         << "Usage: flir_multicam_inventory_tool [options]\n"
@@ -991,7 +1049,11 @@ Options ParseOptions(int argc, char ** argv)
         << "  --new-hardware-trigger-role ROLE      hardware_trigger_role for newly discovered cameras\n"
         << "  --first-camera-ptp-sender             Ensure first camera has ptp_action_role=sender\n"
         << "  --drop-missing                        Remove entries not currently detected\n"
-        << "  --dry-run                             Print YAML instead of writing\n";
+        << "  --dry-run                             Print YAML instead of writing\n"
+        << "  --exclude-model TEXT                  Skip cameras whose model contains TEXT (repeatable)\n"
+        << "  --include-model TEXT                  Only take cameras whose model contains TEXT (repeatable)\n"
+        << "  --name-prefix TEXT                    Name new cameras TEXT0, TEXT1, ... (default: camera)\n"
+        << "  --exclude-cameras-file PATH           Skip serials listed in another inventory YAML (repeatable)\n";
       std::exit(0);
     } else {
       throw std::runtime_error("Unknown argument: " + argument);
@@ -1019,7 +1081,7 @@ int main(int argc, char ** argv)
 
   try {
     const Options options = ParseOptions(argc, argv);
-    const std::vector<DetectedCamera> detected = DetectCameras();
+    std::vector<DetectedCamera> detected = DetectCameras();
     if (detected.empty()) {
       throw std::runtime_error("No FLIR cameras detected by Spinnaker.");
     }
@@ -1044,8 +1106,36 @@ int main(int argc, char ** argv)
     }
     std::cout << ".\n";
 
+    const auto excluded_serials = CollectExcludedSerials(detected, options);
+    const auto is_excluded = [&](const std::string & serial) {
+        return excluded_serials.find(serial) != excluded_serials.end();
+      };
+    for (const auto & camera : detected) {
+      if (is_excluded(camera.serial)) {
+        std::cout << "Excluding camera serial " << camera.serial
+                  << " (model '" << camera.model << "') from " << options.output_path << "\n";
+      }
+    }
+    detected.erase(
+      std::remove_if(
+        detected.begin(),
+        detected.end(),
+        [&](const DetectedCamera & camera) {return is_excluded(camera.serial);}),
+      detected.end());
+
+    std::vector<CameraEntry> existing = ParseExistingCameras(options.output_path);
+    existing.erase(
+      std::remove_if(
+        existing.begin(),
+        existing.end(),
+        [&](const CameraEntry & entry) {
+          const auto serial_it = entry.values.find("serial");
+          return serial_it != entry.values.end() && is_excluded(serial_it->second);
+        }),
+      existing.end());
+
     std::vector<CameraEntry> cameras = MergeDetectedCameras(
-      ParseExistingCameras(options.output_path),
+      std::move(existing),
       detected,
       options);
     AssignForceIpAddresses(cameras, options);

@@ -1,0 +1,124 @@
+flir_camera:
+  ros__parameters:
+    # --------------------------------------------------------------------------
+    # FLIR A70 (thermal, 640x480, GigE Vision) shared configuration
+    # --------------------------------------------------------------------------
+    # multicam.launch.py applies this to every camera in
+    # config/multicam_thermal_cameras.yaml. Single camera:
+    #   ros2 launch flir_spinnaker_camera flir_camera.launch.py \
+    #     params_file:=<share>/config/thermal_camera.yaml camera_serial:=89905156
+    #
+    # Nodes that differ from the Blackfly (BFS-PGE-27S5C):
+    # - No ExposureTime/Gain/Gamma/BlackLevel/WhiteBalance/DeviceLinkThroughputLimit.
+    # - PixelFormat: only Mono8, Mono16, YUV422_8_UYVY, YCbCr411_8_Planar.
+    # - TriggerSelector only has AcquisitionStart-type entries (no FrameStart), and
+    #   there are no Action* nodes -> no per-frame hardware or PTP action trigger.
+    # - PTP uses the SFNC Ptp* nodes (PtpEnable/PtpStatus), not GevIEEE1588*.
+
+    camera_serial: ""
+    camera_index: 0
+    frame_id: "thermal_camera_optical_frame"
+    acquisition_timeout_ms: 5000
+    publisher_qos_reliability: "reliable"
+    publisher_qos_depth: 20
+    # A70 has no working PTP sync here (see ptp.* below), so its clock is not
+    # related to the host or Blackfly clocks. Keep host receive time in the header.
+    use_camera_timestamp_in_header: false
+    camera_info.yaml_path: "calibration/flir_camera_info.yaml"
+
+    # Mono16 carries the full 16-bit thermal value; Mono8 is display-scaled only.
+    auto_pixel_format: false
+    pixel_format: "Mono16"
+    buffer_handling_mode: "NewestOnly"
+    color_processing: "hq_linear"
+
+    publish_raw: true
+    publish_camera_info: true
+    publish_metadata: true
+    # No colour data on a thermal camera; image_raw (mono16) is the output.
+    publish_rgb_compressed: false
+    rgb_compression_format: "jpeg"
+    rgb_jpeg_quality: 80
+    rgb_png_compression_level: 0
+
+    camera_info.distortion_model: "plumb_bob"
+    camera_info.d: [0.0, 0.0, 0.0, 0.0, 0.0]
+    camera_info.k: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    camera_info.r: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    camera_info.p: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    camera_info.binning_x: 0
+    camera_info.binning_y: 0
+    camera_info.roi.x_offset: 0
+    camera_info.roi.y_offset: 0
+    camera_info.roi.height: 0
+    camera_info.roi.width: 0
+    camera_info.roi.do_rectify: false
+
+    # --------------------------------------------------------------------------
+    # Thermal image stream
+    # --------------------------------------------------------------------------
+    # Meaning of each Mono16 pixel:
+    #   "Radiometric"            : raw sensor counts (needs Planck R/B/F/O conversion)
+    #   "TemperatureLinear100mK" : Kelvin = value * 0.1
+    #   "TemperatureLinear10mK"  : Kelvin = value * 0.01   (Celsius = value * 0.01 - 273.15)
+    camera.IRFormat: "TemperatureLinear10mK"
+    # Rate60Hz | Rate30Hz | Rate15Hz | Rate7Hz | Rate4Hz
+    camera.IRFrameRate: "Rate30Hz"
+    # Off | Half | Quarter (sensor windowing, increases max frame rate)
+    # camera.IRWindowing: "Off"
+    camera.Width: 640
+    camera.Height: 480
+
+    # Non-uniformity correction. "Automatic" periodically closes the shutter,
+    # which freezes the image for a fraction of a second. "Off" avoids the
+    # freezes but the image drifts over time; trigger manually with NUCAction.
+    camera.NUCMode: "Automatic"
+
+    # Object parameters used for the temperature calculation (SI units, Kelvin).
+    # camera.ObjectEmissivity: 0.95
+    # camera.ObjectDistance: 1.0
+    # camera.ReflectedTemperature: 293.15
+    # camera.AtmosphericTemperature: 293.15
+    # camera.RelativeHumidity: 0.5
+
+    # Free-run. A70 cannot be frame-triggered (no FrameStart).
+    camera.TriggerMode: "Off"
+
+    # --------------------------------------------------------------------------
+    # Trigger / sync roles: not supported on A70
+    # --------------------------------------------------------------------------
+    hardware_trigger.role: "none"
+    ptp_action.role: "none"
+
+    # PTP: the node uses PtpEnable/PtpStatus on this model. In a 2026-09-18 test
+    # with ptp4l as master (UDPv4 and L2), both A70s stayed in 'Listening' and never
+    # reached 'Slave', so PTP is off by default. To try it anyway, set
+    # ptp.enable: true and keep ptp.require_sync: false. A70 has no PtpMode node,
+    # so ptp.mode is left empty.
+    ptp.enable: false
+    ptp.mode: ""
+    ptp.wait_for_sync: true
+    ptp.require_sync: false
+    ptp.sync_timeout_ms: 10000
+    ptp.sync_poll_ms: 250
+    ptp.accepted_statuses: ["Slave"]
+
+    network.force_ip.enable: false
+    network.force_ip.address: ""
+    network.force_ip.subnet_mask: "255.255.255.0"
+    network.force_ip.gateway: "0.0.0.0"
+    network.force_ip.only_if_link_local: true
+    network.force_ip.wait_after_ms: 1500
+    network.force_ip.rediscovery_timeout_ms: 5000
+
+    # --------------------------------------------------------------------------
+    # GigE transport
+    # --------------------------------------------------------------------------
+    # 640x480x2 B x 30 Hz = ~18 MB/s, so no bandwidth limiting is needed.
+    # Keep packets below the 1500 MTU like the visible cameras.
+    camera.GevSCPSPacketSize: 1400
+
+    stream.StreamBufferCountMode: "Manual"
+    stream.StreamBufferCountManual: 32
+    stream.StreamPacketResendEnable: true
+    stream.StreamPacketResendTimeout: 200

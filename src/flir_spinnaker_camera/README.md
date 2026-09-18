@@ -38,6 +38,7 @@ python3 scripts/multicam_param_set.py camera.ExposureAuto Off
 - [calibration 적용](#calibration-적용)
 - [실행](#실행)
 - [멀티캠 실행](#멀티캠-실행)
+- [Thermal 카메라 (FLIR A70)](#thermal-카메라-flir-a70)
 - [GigE ForceIP](#gige-forceip)
 - [BFS GPIO HW trigger](#bfs-gpio-hw-trigger)
 - [PTP scheduled action trigger](#ptp-scheduled-action-trigger)
@@ -185,6 +186,39 @@ ros2 run flir_spinnaker_camera flir_multicam_inventory_tool \
 ```
 
 자동 갱신은 YAML을 정규화해서 다시 쓰기 때문에 기존 주석은 보존하지 않는다.
+
+## Thermal 카메라 (FLIR A70)
+
+A70은 Blackfly와 다른 inventory `config/multicam_thermal_cameras.yaml`과 공용 설정
+`config/thermal_camera.yaml`을 쓴다. `multicam.launch.py`는 기본으로 둘 다 띄우고,
+A70은 `/thermal0`, `/thermal1` namespace로 나온다.
+
+```bash
+ros2 launch flir_spinnaker_camera multicam.launch.py                               # Blackfly + A70
+ros2 launch flir_spinnaker_camera multicam.launch.py enable_thermal_cameras:=false # Blackfly만
+ros2 launch flir_spinnaker_camera multicam.launch.py enable_visible_cameras:=false # A70만
+```
+
+| 항목 | 값 |
+|---|---|
+| 토픽 | `/thermalN/image_raw` (`mono16`, 640x480, 30Hz), `camera_info`, `image_raw/metadata` |
+| 픽셀값 | `camera.IRFormat: TemperatureLinear10mK` → 값 × 0.01 = Kelvin |
+| IP | `192.168.1.11`부터 (`thermal_force_ip_base`). Blackfly `.1`~`.8`과 겹치지 않게 둔다 |
+| 녹화 | `scripts/all_sensors_bagging.sh`가 `/thermalN/(image_raw\|image_raw/metadata\|camera_info)`를 같이 기록 |
+
+- 두 inventory는 서로를 제외한다. Blackfly 쪽 자동 갱신은 `thermal_model_patterns`
+  (기본 `FLIR A50,FLIR A70`) 모델과 thermal inventory serial을 빼고(`--exclude-model`,
+  `--exclude-cameras-file`), thermal 쪽은 그 모델만 받는다(`--include-model`,
+  새 항목 이름 `thermalN`). 서로의 `force_ip_address`는 사용 중인 주소로 본다.
+- A70 출고 IP는 `192.168.1.x`가 아니다. 리그망에서 쓰려면 `auto_apply_force_ip:=true`로
+  ForceIP를 적용하거나 카메라에 persistent IP를 `192.168.1.11`/`.12`로 저장한다.
+  ForceIP는 전원을 끄면 풀린다.
+- thermal inventory 갱신이 실패해도(카메라 미연결 등) 경고만 내고 Blackfly는 그대로 띄운다.
+- A70에는 FrameStart 트리거와 Action command가 없어 Blackfly와 프레임 단위 동기 촬영이
+  안 된다. free-run이고 header stamp는 host 수신 시각이다.
+- PTP는 `PtpEnable`/`PtpStatus` 노드로 지원하지만, ptp4l grandmaster(UDPv4, L2)에서
+  A70이 `Listening`에서 넘어가지 않아 기본으로 끈다. A70은 announce를 보내지 않으므로
+  PTP를 켜도 grandmaster를 가져가지는 않는다.
 
 ## GigE ForceIP
 

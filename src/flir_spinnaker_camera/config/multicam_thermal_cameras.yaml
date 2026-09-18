@@ -1,0 +1,17 @@
+flir_multicam:
+  ros__parameters:
+    cameras:
+      - name: "thermal0"
+        serial: "89905156"
+        namespace: "thermal0"
+        frame_id: "thermal0_optical_frame"
+        force_ip_address: "192.168.1.11"
+        force_ip_subnet_mask: "255.255.255.0"
+        force_ip_gateway: "0.0.0.0"
+      - name: "thermal1"
+        serial: "89905157"
+        namespace: "thermal1"
+        frame_id: "thermal1_optical_frame"
+        force_ip_address: "192.168.1.12"
+        force_ip_subnet_mask: "255.255.255.0"
+        force_ip_gateway: "0.0.0.0"

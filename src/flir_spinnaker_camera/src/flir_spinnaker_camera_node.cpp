@@ -2037,29 +2037,45 @@ private:
       });
   }
 
+  // Blackfly exposes the legacy GevIEEE1588* nodes; newer SFNC devices such as the
+  // FLIR A50/A70 only expose Ptp* (PtpEnable, PtpStatus, ...).
+  static const char * SelectPtpNodeName(
+    INodeMap & node_map,
+    const char * legacy_name,
+    const char * sfnc_name)
+  {
+    return IsAvailable(node_map.GetNode(legacy_name)) ? legacy_name : sfnc_name;
+  }
+
   void WaitForPtpSync(INodeMap & node_map)
   {
     const auto deadline = std::chrono::steady_clock::now() +
       std::chrono::milliseconds(ptp_sync_timeout_ms_);
     std::string last_status = "unknown";
+    const char * latch_node = SelectPtpNodeName(node_map, "GevIEEE1588DataSetLatch", "PtpDataSetLatch");
+    const char * status_node = SelectPtpNodeName(node_map, "GevIEEE1588Status", "PtpStatus");
+    const char * offset_node = SelectPtpNodeName(
+      node_map, "GevIEEE1588OffsetFromMasterLatched", "PtpOffsetFromMaster");
 
     while (rclcpp::ok()) {
-      ExecuteCommandByName(node_map, "GevIEEE1588DataSetLatch");
+      ExecuteCommandByName(node_map, latch_node);
 
-      if (const auto status = ReadEnumerationNodeValue(node_map, "GevIEEE1588Status")) {
+      if (const auto status = ReadEnumerationNodeValue(node_map, status_node)) {
         last_status = *status;
         if (PtpStatusIsAccepted(last_status)) {
-          const auto offset_ns = ReadIntegerNodeValue(node_map, "GevIEEE1588OffsetFromMasterLatched");
+          const auto offset_ns = ReadIntegerNodeValue(node_map, offset_node);
           if (offset_ns.has_value()) {
             RCLCPP_INFO(
               get_logger(),
-              "PTP synchronized: GevIEEE1588Status='%s', offset_from_master=%ld ns.",
+              "PTP synchronized: %s='%s', offset_from_master=%ld ns.",
+              status_node,
               last_status.c_str(),
               static_cast<long>(*offset_ns));
           } else {
             RCLCPP_INFO(
               get_logger(),
-              "PTP synchronized: GevIEEE1588Status='%s'.",
+              "PTP synchronized: %s='%s'.",
+              status_node,
               last_status.c_str());
           }
           return;
@@ -2074,7 +2090,7 @@ private:
     }
 
     std::ostringstream message;
-    message << "PTP did not reach accepted status before timeout. Last GevIEEE1588Status='"
+    message << "PTP did not reach accepted status before timeout. Last " << status_node << "='"
             << last_status << "', accepted=[";
     for (std::size_t index = 0; index < ptp_accepted_statuses_.size(); ++index) {
       if (index > 0U) {
@@ -2098,19 +2114,22 @@ private:
     }
 
     const std::string context = "PTP";
-    if (!SetBooleanByName(node_map, "GevIEEE1588", true)) {
-      throw std::runtime_error(context + ": failed to enable GevIEEE1588.");
+    const char * enable_node = SelectPtpNodeName(node_map, "GevIEEE1588", "PtpEnable");
+    if (!SetBooleanByName(node_map, enable_node, true)) {
+      throw std::runtime_error(context + ": failed to enable " + enable_node + ".");
     }
-    RCLCPP_INFO(get_logger(), "%s: GevIEEE1588=true", context.c_str());
+    RCLCPP_INFO(get_logger(), "%s: %s=true", context.c_str(), enable_node);
 
     if (!ptp_mode_.empty()) {
-      if (TryEnumeration(node_map, "GevIEEE1588Mode", ptp_mode_, context)) {
+      const char * mode_node = SelectPtpNodeName(node_map, "GevIEEE1588Mode", "PtpMode");
+      if (TryEnumeration(node_map, mode_node, ptp_mode_, context)) {
         RCLCPP_INFO(get_logger(), "%s: requested mode '%s'.", context.c_str(), ptp_mode_.c_str());
       } else {
         RCLCPP_WARN(
           get_logger(),
-          "%s: GevIEEE1588Mode='%s' is not writable/available. Continuing with camera default.",
+          "%s: %s='%s' is not writable/available. Continuing with camera default.",
           context.c_str(),
+          mode_node,
           ptp_mode_.c_str());
       }
     }

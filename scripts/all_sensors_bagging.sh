@@ -32,6 +32,9 @@ export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}"
 # explicitly. --regex applies to the whole invocation, so the lidar names are
 # written as exact-match patterns rather than plain topic arguments.
 camera_regex='/camera_[a-z0-9_]+/(image_rgb/compressed|image_raw/metadata|camera_info)'
+# Thermal cameras (FLIR A70) have no image_rgb; image_raw is mono16 temperature
+# (value * 0.01 = Kelvin), ~18 MB/s per camera. Optional: no warning when absent.
+thermal_regex='/thermal[0-9]+/(image_raw|image_raw/metadata|camera_info)'
 
 # Packets, not points. /ouster/points is the debayer-equivalent for the lidar: it
 # is reconstructed from the raw packets on replay, so recording lidar_packets +
@@ -52,7 +55,7 @@ common_topics=(
 
 # Anchor each literal name so --regex cannot match a longer topic that merely
 # contains it.
-patterns=("^${camera_regex}$")
+patterns=("^${camera_regex}$" "^${thermal_regex}$")
 for t in "${lidar_topics[@]}" "${common_topics[@]}"; do
   patterns+=("^${t}$")
 done
