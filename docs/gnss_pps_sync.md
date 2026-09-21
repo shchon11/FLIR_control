@@ -152,6 +152,78 @@ ros2 launch flir_spinnaker_camera multicam.launch.py ptp_master_interface:=""
 
 각 단계는 앞 단계 통과를 전제한다. 실패하면 그 자리에서 해결하고 진행한다.
 
+**T-1만 예외다.** PPS 배선 없이 현재 PTP action 리그로 수행할 수 있고, 그 결과가
+§6의 설계를 좌우하므로 배선 작업 전에 끝내 두는 편이 낫다.
+
+### T-1 — 노출 래치 시점 판별 (배선 전에, 지금 가능)
+
+**무엇을 정하는가:** 카메라가 타임스탬프를 노출 **시작**에 찍는지 **종료**에
+찍는지. 이 한 번의 측정이 세 가지를 동시에 결정한다.
+
+| 결과 | `timestamp.subtract_exposure` (§6) | Chunk data 작업 | autoexposure |
+|------|-----------------------------------|-----------------|--------------|
+| 시작 래치 | 불필요 | 불필요 | 타임스탬프에 영향 없음 — 자유롭게 사용 |
+| 종료 래치 | **필요** | **필요** (아래 참조) | 보정 없이는 사용 불가 |
+
+**원리 — 차등 노출.** 같은 트리거에 노출을 시작한 두 카메라의 노출 시간을 다르게
+준다. 시작 래치면 두 타임스탬프가 같고, 종료 래치면 노출 차이만큼 벌어진다.
+절대 기준이 필요 없어서 PPS 없이도 성립한다.
+
+**절차:**
+
+```bash
+# 0) 먼저 트리거 주기를 늘린다. 노출을 60 ms까지 올릴 텐데 30 Hz(33 ms 주기)에서는
+#    노출이 주기를 넘어 트리거를 건너뛴다 (flir_camera.yaml 의 ptp_action.rate_hz 주석).
+#    flir_camera.yaml: ptp_action.rate_hz: 10.0   → 주기 100 ms
+
+# 1) 리그 기동 후 전 카메라를 같은 노출로 맞춘다
+ros2 node list | grep camera          # 노드 이름 확인
+# 각 카메라 노드에 대해:
+ros2 param set /<camera_ns>/<node> camera.ExposureTime 10000.0
+
+# 2) 기준 스프레드 측정 (A)
+python3 scripts/check_multicam_sync.py --duration 20
+
+# 3) 카메라 '한 대만' 노출을 크게
+ros2 param set /camera_front_right/<node> camera.ExposureTime 60000.0
+
+# 4) 다시 측정 (B)
+python3 scripts/check_multicam_sync.py --duration 20
+```
+
+**판정:**
+
+| 결과 | 해석 |
+|------|------|
+| B ≈ A (스프레드 변화 없음) | **노출 시작 래치.** §6의 노출 보정과 chunk 작업이 전부 불필요해진다 |
+| B − A ≈ 50 ms (= 60 − 10) | **노출 종료 래치 확정.** sensors.yaml 의 서술이 맞았던 것 |
+| B − A 가 50 ms의 일부만 | 예상 밖. 실측값을 기록하고 재검토 |
+
+**주의:**
+
+- `camera.ExposureAuto`가 `Off`여야 `ExposureTime`이 쓰기 가능하다 (현재 `Off`).
+  `Continuous`면 노드가 "not writable"로 거부한다.
+- 노출을 바꾼 카메라가 PTP action **sender**면 트리거 주기 자체에 영향을 줄 수
+  있으니, receiver 카메라를 골라 바꾼다 (현재 sender는 `camera_front_right`이므로
+  다른 카메라를 고르거나 sender를 먼저 옮긴다).
+- 측정이 끝나면 `ptp_action.rate_hz`와 노출을 원래대로 되돌린다.
+
+**종료 래치로 판명되면 — chunk data가 필요하다.** 현재
+[`flir_spinnaker_camera_node.cpp:3212-3213`](../src/flir_spinnaker_camera/src/flir_spinnaker_camera_node.cpp#L3212-L3213)은
+노출 시간을 **퍼블리시 시점에 카메라 레지스터에서 읽는다**. 고정 노출이면 우연히
+맞지만 autoexposure면 프레임과 값이 어긋나고(읽는 시점이 이미 수십 ms 뒤), 프레임당
+10개 노드를 읽어 8대 × 30 Hz면 초당 2400회 GigE 왕복이 된다. 해법은 Chunk Data다:
+
+```cpp
+ChunkModeActive = true
+ChunkSelector = "ExposureTime";  ChunkEnable = true
+// 수신 시
+const double exposure_us = image->GetChunkData().GetExposureTime();
+```
+
+그 프레임의 실제 노출이 프레임에 실려 온다. 레포 전체에 chunk 사용처가 한 곳도
+없으므로 신규 작업이다. **시작 래치로 판명되면 이 작업은 통째로 불필요하다.**
+
 ### T0 — PC의 PTP 상태
 
 ```bash
@@ -243,11 +315,11 @@ residual_ns = camera_timestamp_ns % 1_000_000_000
 `ExposureTime`을 바꿔가며 잔차가 따라 움직이는지 보는 것이 노출 시작/종료
 래치를 구분하는 확실한 방법이다. 이 구성에서만 가능한 진단이므로 반드시 수행한다.
 
-**노출 종료 래치일 가능성이 높다.** DM_Clipgui의 `config/sensors.yaml`에서
-`camera.ExposureTime` 항목의 설명이 이미 "카메라는 노출이 끝날 때 타임스탬프를
-찍어서, 카메라마다 노출이 다르면 동기가 그만큼 어긋나 보인다"라고 기술하고 있다.
-현장 경험에서 나온 서술로 보이며, 사실이라면 잔차는 18 ms 근처로 나오고 §6의
-`timestamp.subtract_exposure`가 필요하다. T4로 확정한다.
+**"노출 끝에 찍힌다"는 아직 검증되지 않았다.** DM_Clipgui의
+`config/sensors.yaml`에 그런 설명이 달려 있으나(`camera.ExposureTime` help,
+커밋 `94df95b`, 2026-09-19), 뒷받침하는 측정 기록이 양쪽 리포 어디에도 없다.
+FLIR 공식 문서도 Blackfly S의 래치 시점을 명확히 하지 않는다. **가정하지 말고
+T-1로 먼저 확정한다** — T-1은 PPS 배선 없이 지금 리그로 잴 수 있다.
 
 ### T5 — header.stamp 정합 (§6 적용 후)
 
@@ -357,6 +429,8 @@ GM이 광고하는 값을 확인할 수 있다.
 |------|------|
 | `multicam_cameras.yaml` 역할 전환 (§4①) | 배선 확인 후 |
 | `flir_camera.yaml` PTP 활성화 (§4②) | 배선 확인 후 |
+| **T-1 노출 래치 판별 (§5)** | **배선 전 지금 가능 — 최우선** |
+| Chunk data 노출 취득 (T-1이 종료 래치일 때만) | T-1 후 |
 | T4 잔차 측정 스크립트 (`scripts/check_pps_phase.py`) | 신규 작성 필요 |
 | `check_multicam_sync.py` 임계값 하향 (§5 T3) | T3 실측 후 |
 | `ResolveHeaderStamp` 직접 변환 (§6) | T4 확정 후 |
