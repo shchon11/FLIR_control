@@ -190,7 +190,7 @@ flir_camera:
     # Exposure
     # --------------------------------------------------------------------------
     # Off | Once | Continuous
-    camera.ExposureAuto: "Continuous"
+    camera.ExposureAuto: "Off"
     # Exposure time, in microseconds. Set this explicitly: the cameras persist
     # exposure in flash, so leaving it unset means each one keeps whatever value
     # it was last given. That is how two of the eight ended up at 15 ms while the
@@ -210,7 +210,7 @@ flir_camera:
     # here pinned all eight cameras to 14993 us — the camera's auto upper limit —
     # and brought the mean to 45-72. If you shorten this for a moving rig, raise
     # camera.GainDB_Val to compensate or the image goes dark again.
-    # camera.ExposureTime: 18000.0
+    camera.ExposureTime: 15700.0
     # Exposure mode is camera-specific; inspect valid enum values if needed:
     # camera.ExposureMode: "Timed"
 
@@ -220,7 +220,7 @@ flir_camera:
     # Off | Once | Continuous
     camera.GainAuto: "Off"
     # Gain in dB.
-    camera.GainDB_Val: 10.0
+    camera.GainDB_Val: 8.5
     # Optional alternatives/related controls:
     # camera.Gain: 0.0
     # camera.GainRaw: 0
@@ -230,14 +230,14 @@ flir_camera:
     # White balance / color
     # --------------------------------------------------------------------------
     # Off | Once | Continuous
-    # camera.BalanceWhiteAuto: "Off"
+    camera.BalanceWhiteAuto: "Off"
     # Select which channel ratio to edit.
     # camera.BalanceRatioSelector: "Red"     # Red | Blue
     # Manual white-balance ratio for the selected channel.
     # camera.BalanceRatio_FloatVal: 1.0
     # Vendor aliases also exist on this camera:
-    # camera.BalanceRatioBlue_Val: 1.0
-    # camera.BalanceRatioRed_Val: 1.0
+    camera.BalanceRatioBlue_Val: 19497
+    camera.BalanceRatioRed_Val: 13681
 
     # --------------------------------------------------------------------------
     # Tone / black level
@@ -245,9 +245,9 @@ flir_camera:
     # Enables/disables gamma correction.
     camera.GammaEnable: true
     # Gamma value when gamma is enabled.
-    # camera.Gamma_FloatVal: 1.0
+    camera.Gamma_FloatVal: 0.5
     # Video-signal offset in percent.
-    # camera.BlackLevel: 0.0
+    camera.BlackLevel: 0.0
 
     # --------------------------------------------------------------------------
     # ROI / resolution / sensor-side reduction
@@ -379,14 +379,20 @@ flir_camera:
     camera.GevSCPSPacketSize: 9000
     # Inter-packet delay in ticks. Raise it if the switch drops packets when all
     # eight cameras burst at once.
-    camera.GevSCPD: 0
+    # camera.GevSCPD: 0
 
     # Limits the maximum bandwidth streamed by the camera, in bytes/sec. This is
     # a hard cap on frame rate: fps <= limit / (width * height * bytes_per_pixel).
     # At 1920x1200 BayerRG8 (2.3 MB/frame), 100 MB/s allows ~43 fps. Each camera
     # has its own 1 GbE link (~110 MB/s ceiling); eight of them share the PC's
     # 10 GbE NIC, so 8 x 100 MB/s still fits the uplink.
-    camera.DeviceLinkThroughputLimit: 100000000
+    #
+    # 14대로 늘면 100 MB/s 는 넘친다: 동시 트리거라 순간 합이 14 x 100 = 1400 MB/s 로 10 GbE 실효(~1150 MB/s)를
+    # 넘고, 스위치 버퍼가 넘치면 패킷이 버려져 노드가 그 프레임을 통째로 버린다 ("Incomplete image", status=3).
+    # 2026-09-23 실측: 100 MB/s 로 돌던 낮에는 클립 27개(376k 프레임)에서 96프레임이 그렇게 빠졌고 특정 카메라
+    # (side_right · rear_right · front7)에 몰렸다. 75 MB/s (14 x 75 = 1050 MB/s) 로 내린 뒤 분당 4.9건 → 0.0건.
+    # 한 프레임(2.3 MB)을 75 MB/s 로 보내면 31 ms — 30 Hz 프레임 간격(33 ms) 안에 고르게 흘러간다.
+    camera.DeviceLinkThroughputLimit: 75000000
     # Bandwidth reserve for link robustness / resends.
     # camera.DeviceLinkBandwidthReserve: 0
 
@@ -415,3 +421,6 @@ flir_camera:
     # tl_device.GevDeviceForceGateway: 3232235777
     # tl_device.GevDeviceReadAndWriteTimeout: 1000000
     # tl_device.GevDeviceMaximumRetryCount: 3
+
+    # DM_clipGUI [기본값으로 저장] 으로 추가 (2026-09-24)
+    camera.BlackLevelClampingEnable: true

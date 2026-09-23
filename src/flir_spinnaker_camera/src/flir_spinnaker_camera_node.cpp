@@ -14,6 +14,10 @@
 #include <cstring>
 #include <cmath>
 #include <deque>
+#include <arpa/inet.h>
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <netinet/in.h>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -697,6 +701,7 @@ public:
     timestamp_capture_offset_ns_(declare_parameter<std::int64_t>("timestamp.capture_offset_ns", 0)),
     timestamp_latch_interval_sec_(declare_parameter<double>("timestamp.latch_interval_sec", 2.0)),
     chunk_data_enable_(declare_parameter<bool>("chunk_data.enable", true)),
+    stream_stats_interval_sec_(declare_parameter<double>("stream_stats.interval_sec", 30.0)),
     camera_info_yaml_path_(declare_parameter<std::string>("camera_info.yaml_path", "")),
     auto_pixel_format_(declare_parameter<bool>("auto_pixel_format", true)),
     pixel_format_(declare_parameter<std::string>("pixel_format", "")),
@@ -1911,6 +1916,7 @@ private:
     ApplyHardwareTriggerConfiguration(node_map);
     ApplyPtpActionConfiguration(node_map);
     ApplyChunkData(node_map);
+    LogLinkSettings(node_map, tl_node_map);
     VerifyControlOverridesTookEffect();
 
     const std::string selected_serial = SafeNodeString(tl_node_map, "DeviceSerialNumber");
@@ -3604,6 +3610,130 @@ private:
   }
 
   // What ReadFrameInfo found for one frame (chunk data, or the GVSP leader).
+  // 카메라가 붙은 PC NIC 을 카메라 IP 로 찾는다 (같은 서브넷). 못 찾으면 빈 문자열.
+  static std::string HostNicForCameraIp(std::uint32_t camera_ip)
+  {
+    struct ifaddrs * list = nullptr;
+    if (getifaddrs(&list) != 0) {
+      return "";
+    }
+    std::string found;
+    for (struct ifaddrs * it = list; it != nullptr && found.empty(); it = it->ifa_next) {
+      if (it->ifa_addr == nullptr || it->ifa_addr->sa_family != AF_INET || it->ifa_netmask == nullptr) {
+        continue;
+      }
+      const std::uint32_t addr =
+        ntohl(reinterpret_cast<struct sockaddr_in *>(it->ifa_addr)->sin_addr.s_addr);
+      const std::uint32_t mask =
+        ntohl(reinterpret_cast<struct sockaddr_in *>(it->ifa_netmask)->sin_addr.s_addr);
+      if ((addr & mask) == (camera_ip & mask)) {
+        found = it->ifa_name;
+      }
+    }
+    freeifaddrs(list);
+    return found;
+  }
+
+  static std::int64_t ReadSysNetValue(const std::string & nic, const char * file)
+  {
+    std::ifstream stream("/sys/class/net/" + nic + "/" + file);
+    std::int64_t value = -1;
+    if (stream >> value) {
+      return value;
+    }
+    return -1;
+  }
+
+  // 링크 설정을 기동 로그에 한 줄로 남긴다. 2026-09-23 에 카메라가 프레임을 통째로 버리던 구간의 원인을
+  // 사후에 못 가렸다 — MTU 가 1500 으로 돌아갔는지, 링크 제한이 얼마였는지가 어디에도 안 남아 있었다.
+  void LogLinkSettings(INodeMap & node_map, INodeMap & tl_node_map)
+  {
+    link_throughput_limit_ = ReadIntegerNodeValue(node_map, "DeviceLinkThroughputLimit").value_or(-1);
+    link_packet_size_ = ReadIntegerNodeValue(node_map, "GevSCPSPacketSize").value_or(-1);
+    const auto ip = ReadIntegerNodeValue(tl_node_map, "GevDeviceIPAddress");
+    if (ip && *ip > 0) {
+      host_nic_ = HostNicForCameraIp(static_cast<std::uint32_t>(*ip));
+    }
+    std::int64_t speed = -1;
+    if (!host_nic_.empty()) {
+      host_mtu_ = ReadSysNetValue(host_nic_, "mtu");
+      speed = ReadSysNetValue(host_nic_, "speed");
+    }
+    RCLCPP_INFO(
+      get_logger(),
+      "Link: throughput limit %.1f MB/s, packet %ld B; host NIC %s MTU %ld, %ld Mb/s.",
+      link_throughput_limit_ > 0 ? static_cast<double>(link_throughput_limit_) / 1e6 : -1.0,
+      static_cast<long>(link_packet_size_), host_nic_.empty() ? "?" : host_nic_.c_str(),
+      static_cast<long>(host_mtu_), static_cast<long>(speed));
+    if (host_mtu_ > 0 && link_packet_size_ > host_mtu_) {
+      RCLCPP_ERROR(
+        get_logger(),
+        "GevSCPSPacketSize %ld is larger than the host NIC MTU %ld — the NIC drops every packet and no frame "
+        "completes. Set the NIC to jumbo frames (MTU 9000) or lower the packet size.",
+        static_cast<long>(link_packet_size_), static_cast<long>(host_mtu_));
+    }
+  }
+
+  // 수신 상태 요약을 주기적으로 로그에 남긴다 (획득 스레드에서만 호출).
+  //
+  // 토픽으로 내보내지 않는다 — bag 에 토픽을 늘리지 않으려고 (2026-09-24 요청). 대신 형식을 고정해서
+  // DM_clipGUI 의 진단기가 녹화 구간의 이 줄들을 모아 diagnostics.txt 에 넣는다. "Incomplete image" 경고는
+  // 5초에 한 번만 찍혀 개수를 알 수 없었던 것을 대신한다.
+  void ReportStreamStats(const rclcpp::Time & /*stamp*/)
+  {
+    if (stream_stats_interval_sec_ <= 0.0) {
+      return;
+    }
+    const auto now_steady = std::chrono::steady_clock::now();
+    if (next_stats_report_.time_since_epoch().count() == 0) {
+      next_stats_report_ = now_steady + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+        std::chrono::duration<double>(stream_stats_interval_sec_));
+      return;
+    }
+    if (now_steady < next_stats_report_) {
+      return;
+    }
+    next_stats_report_ = now_steady + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+      std::chrono::duration<double>(stream_stats_interval_sec_));
+
+    const auto stream_value = [this](const char * name) {
+        return stream_node_map_ == nullptr ? static_cast<std::int64_t>(-1)
+               : ReadIntegerNodeValue(*stream_node_map_, name).value_or(-1);
+      };
+    const std::int64_t missed = stream_value("StreamMissedPacketCount");
+    const std::int64_t resend_req = stream_value("StreamPacketResendRequestCount");
+    const std::int64_t resent = stream_value("StreamPacketResendReceivedCount");
+    const std::int64_t lost_frames = stream_value("StreamLostFrameCount");
+    const std::int64_t input_buffers = stream_value("StreamInputBufferCount");
+    const bool trouble = window_incomplete_ > 0 || window_stale_ > 0;
+    const auto text =
+      "stream_stats: interval=%.0fs frames=%lu incomplete=%lu stale=%lu total_incomplete=%lu "
+      "missed_packets=%ld resend_req=%ld resent=%ld stream_lost=%ld input_buffers=%ld "
+      "limit_MBps=%.1f packet=%ld mtu=%ld nic=%s";
+    if (trouble) {
+      RCLCPP_WARN(
+        get_logger(), text, stream_stats_interval_sec_,
+        static_cast<unsigned long>(window_published_), static_cast<unsigned long>(window_incomplete_),
+        static_cast<unsigned long>(window_stale_), static_cast<unsigned long>(incomplete_frames_),
+        static_cast<long>(missed), static_cast<long>(resend_req), static_cast<long>(resent),
+        static_cast<long>(lost_frames), static_cast<long>(input_buffers),
+        link_throughput_limit_ > 0 ? static_cast<double>(link_throughput_limit_) / 1e6 : -1.0,
+        static_cast<long>(link_packet_size_), static_cast<long>(host_mtu_),
+        host_nic_.empty() ? "?" : host_nic_.c_str());
+    } else {
+      RCLCPP_INFO(
+        get_logger(), text, stream_stats_interval_sec_,
+        static_cast<unsigned long>(window_published_), static_cast<unsigned long>(window_incomplete_),
+        static_cast<unsigned long>(window_stale_), static_cast<unsigned long>(incomplete_frames_),
+        static_cast<long>(missed), static_cast<long>(resend_req), static_cast<long>(resent),
+        static_cast<long>(lost_frames), static_cast<long>(input_buffers),
+        link_throughput_limit_ > 0 ? static_cast<double>(link_throughput_limit_) / 1e6 : -1.0,
+        static_cast<long>(link_packet_size_), static_cast<long>(host_mtu_),
+        host_nic_.empty() ? "?" : host_nic_.c_str());
+    }
+    window_published_ = window_incomplete_ = window_stale_ = 0;
+  }
+
   struct FrameInfo
   {
     std::uint64_t frame_id{0};
@@ -3846,6 +3976,7 @@ private:
     if (last_frame_timestamp_ns_ != 0U && info.timestamp_ns <= last_frame_timestamp_ns_) {
       info.stale = true;
       ++stale_frames_;
+      ++window_stale_;
       RCLCPP_WARN_THROTTLE(
         get_logger(), *get_clock(), 10000,
         "Frame info did not advance (frame_id %llu, timestamp %.3f s behind the previous frame; %llu such "
@@ -4178,6 +4309,8 @@ private:
             "Incomplete image received. status=%d",
             static_cast<int>(image->GetImageStatus()));
           ++skipped_since_last_frame_;       // a trigger that produced no published frame
+          ++incomplete_frames_;
+          ++window_incomplete_;
           image->Release();
           continue;
         }
@@ -4229,6 +4362,9 @@ private:
           }
         }
 
+        ++published_frames_;
+        ++window_published_;
+        ReportStreamStats(stamp);
         image->Release();
       } catch (const Spinnaker::Exception & exception) {
         if (!running_.load()) {
@@ -4338,6 +4474,7 @@ private:
   std::int64_t timestamp_capture_offset_ns_;
   double timestamp_latch_interval_sec_;
   bool chunk_data_enable_;
+  double stream_stats_interval_sec_;
   std::string camera_info_yaml_path_;
   bool auto_pixel_format_;
   std::string pixel_format_;
@@ -4413,6 +4550,17 @@ private:
   bool chunk_timestamp_checked_{false};
   std::uint64_t last_frame_timestamp_ns_{0};
   std::uint64_t stale_frames_{0};
+  // 수신 상태 집계 (획득 스레드에서만 센다)
+  std::uint64_t published_frames_{0};
+  std::uint64_t incomplete_frames_{0};
+  std::uint64_t window_published_{0};
+  std::uint64_t window_incomplete_{0};
+  std::uint64_t window_stale_{0};
+  std::chrono::steady_clock::time_point next_stats_report_{};
+  std::int64_t link_throughput_limit_{-1};
+  std::int64_t link_packet_size_{-1};
+  std::int64_t host_mtu_{-1};
+  std::string host_nic_;
   std::deque<std::int64_t> frame_intervals_ns_;
   std::int64_t frame_period_ns_{0};
   std::int64_t last_exposure_start_ns_{0};

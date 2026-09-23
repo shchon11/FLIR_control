@@ -44,10 +44,10 @@ ouster/os_driver:
     #                       PointCloud2 and LaserScan messages.
     # RT2000(oxford_gps_eth)이 use_gps_time:false 로 PC 시각을 쓰므로 LiDAR도 같은
     # 시계에 맞춘다. PPS 결선 시 TIME_FROM_SYNC_PULSE_IN 으로 바꿀 것.
-    timestamp_mode: 'TIME_FROM_ROS_TIME'
+    timestamp_mode: "TIME_FROM_PTP_1588"
     # ptp_utc_tai_offset[optional]: UTC/TAI offset in seconds to apply when
     # TIME_FROM_PTP_1588 timestamp mode is used.
-    ptp_utc_tai_offset: -37.0
+    ptp_utc_tai_offset: 0.0
     # udp_profile_lidar[optional]: lidar packet profile; possible values:
     # - LEGACY: not recommended
     # - RNG19_RFL8_SIG16_NIR16
@@ -141,7 +141,7 @@ ouster/os_driver:
     # default is 1.0.
     signal_multiplier: 1.0
     # phase_lock_enable[optional]: enable or disable phase lock.
-    phase_lock_enable: false
+    phase_lock_enable: true
     # phase_lock_offset[optional]: angle that sensors are locked to in millidegrees, values range [0, 360000].
     phase_lock_offset: 0
     # lidar_frame_azimuth_offset[optional]: The lidar frame azimuth offset for the sensor to use in millidegrees;
