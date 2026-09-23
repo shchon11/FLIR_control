@@ -10,8 +10,10 @@
 #include <chrono>
 #include <cctype>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <cmath>
+#include <deque>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -19,6 +21,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -369,6 +372,40 @@ std::string NormalizePtpActionRole(const std::string & value)
           "ptp_action.role must be one of none, receiver, or sender; got '" + value + "'.");
 }
 
+// header.stamp source. Empty keeps the older boolean use_camera_timestamp_in_header.
+std::string NormalizeTimestampMode(const std::string & value, bool legacy_use_camera_timestamp)
+{
+  const std::string normalized = NormalizeName(value);
+  if (normalized.empty()) {
+    return legacy_use_camera_timestamp ? "camera_first_frame" : "host";
+  }
+  if (normalized == "host") {
+    return "host";
+  }
+  if (normalized == "cameralatched") {
+    return "camera_latched";
+  }
+  if (normalized == "camerafirstframe") {
+    return "camera_first_frame";
+  }
+  throw std::runtime_error(
+          "timestamp.mode must be one of host, camera_latched, or camera_first_frame; got '" +
+          value + "'.");
+}
+
+std::string NormalizeExposureLatch(const std::string & value)
+{
+  const std::string normalized = NormalizeName(value);
+  if (normalized.empty() || normalized == "start") {
+    return "start";
+  }
+  if (normalized == "end") {
+    return "end";
+  }
+  throw std::runtime_error(
+          "timestamp.exposure_latch must be start or end; got '" + value + "'.");
+}
+
 std::uint32_t ValidateUint32Parameter(std::int64_t value, const char * parameter_name)
 {
   if (value < 0 || value > static_cast<std::int64_t>(std::numeric_limits<std::uint32_t>::max())) {
@@ -649,6 +686,17 @@ public:
     camera_init_retry_delay_ms_(declare_parameter<int>("camera_init.retry_delay_ms", 2000)),
     acquisition_timeout_ms_(declare_parameter<int>("acquisition_timeout_ms", 1000)),
     use_camera_timestamp_in_header_(declare_parameter<bool>("use_camera_timestamp_in_header", false)),
+    timestamp_mode_(NormalizeTimestampMode(
+        declare_parameter<std::string>("timestamp.mode", ""), use_camera_timestamp_in_header_)),
+    timestamp_exposure_latch_(NormalizeExposureLatch(
+        declare_parameter<std::string>("timestamp.exposure_latch", "start"))),
+    timestamp_trigger_grid_hz_(declare_parameter<double>("timestamp.trigger_grid_hz", 0.0)),
+    timestamp_trigger_grid_offset_ns_(declare_parameter<std::int64_t>(
+        "timestamp.trigger_grid_offset_ns", 0)),
+    timestamp_grid_warn_ms_(declare_parameter<double>("timestamp.grid_warn_ms", 3.0)),
+    timestamp_capture_offset_ns_(declare_parameter<std::int64_t>("timestamp.capture_offset_ns", 0)),
+    timestamp_latch_interval_sec_(declare_parameter<double>("timestamp.latch_interval_sec", 2.0)),
+    chunk_data_enable_(declare_parameter<bool>("chunk_data.enable", true)),
     camera_info_yaml_path_(declare_parameter<std::string>("camera_info.yaml_path", "")),
     auto_pixel_format_(declare_parameter<bool>("auto_pixel_format", true)),
     pixel_format_(declare_parameter<std::string>("pixel_format", "")),
@@ -722,6 +770,7 @@ public:
     ptp_action_schedule_ahead_ms_(declare_parameter<double>(
         "ptp_action.schedule_ahead_ms", 100.0)),
     ptp_action_start_delay_ms_(declare_parameter<double>("ptp_action.start_delay_ms", 1000.0)),
+    ptp_action_align_to_second_(declare_parameter<bool>("ptp_action.align_to_second", true)),
     ptp_action_request_ack_(declare_parameter<bool>("ptp_action.request_ack", false)),
     ptp_action_expected_ack_count_(declare_parameter<int>("ptp_action.expected_ack_count", 0)),
     ptp_action_log_interval_sec_(declare_parameter<double>("ptp_action.log_interval_sec", 5.0)),
@@ -878,6 +927,9 @@ public:
     try {
       InitializeCamera();
       running_.store(true);
+      // Before the acquisition thread: the camera->host mapping must exist before the first frame is
+      // stamped, or the first frames of a recording carry host time and the rest exposure time.
+      StartClockSync();
       acquisition_thread_ = std::thread(&FlirSpinnakerCameraNode::AcquisitionLoop, this);
       StartPtpActionSender();
     } catch (...) {
@@ -1193,7 +1245,8 @@ private:
     throw std::runtime_error("unsupported control parameter type");
   }
 
-  void RegisterWritableControlParameters(INodeMap & node_map, ControlMapKind map_kind)
+  std::size_t RegisterWritableControlParameters(
+    INodeMap & node_map, ControlMapKind map_kind, bool log_summary = true)
   {
     NodeList_t nodes;
     node_map.GetNodes(nodes);
@@ -1228,11 +1281,244 @@ private:
       }
     }
 
-    RCLCPP_INFO(
-      get_logger(),
-      "Registered %zu writable %s control parameters.",
-      registered,
-      ControlPrefix(map_kind).c_str());
+    if (log_summary) {
+      RCLCPP_INFO(
+        get_logger(),
+        "Registered %zu writable %s control parameters.",
+        registered,
+        ControlPrefix(map_kind).c_str());
+    }
+    return registered;
+  }
+
+  // A node that is locked when the camera is opened is not registered, so its startup override
+  // used to be dropped without a word: AcquisitionFrameRate while AcquisitionFrameRateEnable is
+  // false, ExposureTime while ExposureAuto is not Off, Gamma while GammaEnable is false. Which of
+  // them are locked depends on the state the camera kept from whatever ran it last (settings live
+  // in camera RAM until a power cycle), so it hit some cameras and not others — on 2026-09-21 one
+  // of fourteen came up without its 30 fps limit and took ~51 fps of the link. The overrides just
+  // applied are what unlock them, so register what became writable and apply its overrides, until
+  // nothing new shows up.
+  void RegisterControlParametersUnlockedByOverrides()
+  {
+    for (int round = 0; round < 4; ++round) {
+      const std::size_t added =
+        RegisterWritableControlParameters(*camera_node_map_, ControlMapKind::Camera, false) +
+        RegisterWritableControlParameters(*stream_node_map_, ControlMapKind::Stream, false) +
+        RegisterWritableControlParameters(*tl_device_node_map_, ControlMapKind::TlDevice, false);
+      if (added == 0U) {
+        return;
+      }
+      RCLCPP_INFO(
+        get_logger(),
+        "Registered %zu control parameters unlocked by the startup overrides.",
+        added);
+      NormalizeFrameRateStartupOverrides();
+      ApplyPendingControlOverrides();
+    }
+  }
+
+  // Whatever is still unregistered never reached the camera. Say so loudly instead of starting a
+  // camera that quietly ignores part of its configuration.
+  void ReportIgnoredControlOverrides()
+  {
+    std::string ignored;
+    std::size_t count = 0U;
+    for (const auto & entry : get_node_parameters_interface()->get_parameter_overrides()) {
+      const std::string & name = entry.first;
+      std::optional<ControlMapKind> kind;
+      for (const auto candidate : {ControlMapKind::Camera, ControlMapKind::Stream, ControlMapKind::TlDevice}) {
+        if (name.rfind(ControlPrefix(candidate) + ".", 0) == 0) {
+          kind = candidate;
+        }
+      }
+      if (!kind.has_value() || control_bindings_.count(name) > 0U) {
+        continue;
+      }
+      if (IsManagedControlNode(*kind, name.substr(ControlPrefix(*kind).size() + 1U))) {
+        continue;
+      }
+      ignored += (count++ == 0U ? "" : ", ") + name;
+    }
+    if (count > 0U) {
+      RCLCPP_ERROR(
+        get_logger(),
+        "%zu startup camera override(s) NOT applied — the GenICam node is locked, unavailable or "
+        "absent in this camera state: %s",
+        count,
+        ignored.c_str());
+    }
+  }
+
+  // Nodes the startup sequence writes on purpose after the camera.* overrides (PTP, hardware
+  // trigger, PTP action, chunk data). Their final value is the node's decision, not a drift.
+  static bool IsSetByStartupLogic(const std::string & node_name)
+  {
+    for (const char * prefix : {"Trigger", "Line", "GevIEEE1588", "Ptp", "Action", "UserOutput",
+        "V3_3Enable", "Chunk", "Timestamp", "AcquisitionMode", "PixelFormat", "StreamBufferHandlingMode"})
+    {
+      if (node_name.rfind(prefix, 0) == 0) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // What the camera holds for this binding, as text, when it differs from `wanted` beyond the
+  // camera's own rounding (increment, or 0.5 % — AcquisitionFrameRate 30 is kept as 29.9952,
+  // DeviceLinkThroughputLimit 75000000 as 75001631). nullopt when it matches or cannot be read.
+  std::optional<std::string> ControlValueMismatch(
+    const ControlBinding & binding, const rclcpp::Parameter & wanted)
+  {
+    try {
+      INodeMap & node_map = ResolveNodeMap(binding.map_kind);
+      CNodePtr node = node_map.GetNode(binding.node_name.c_str());
+      if (!IsReadable(node)) {
+        return std::nullopt;
+      }
+      switch (binding.value_kind) {
+        case ControlValueKind::Boolean:
+        {
+          if (wanted.get_type() != rclcpp::ParameterType::PARAMETER_BOOL) {
+            return std::nullopt;
+          }
+          CBooleanPtr value_node = node_map.GetNode(binding.node_name.c_str());
+          const bool current = value_node->GetValue();
+          return current == wanted.as_bool() ? std::nullopt :
+                 std::optional<std::string>(current ? "true" : "false");
+        }
+        case ControlValueKind::Integer:
+        {
+          if (wanted.get_type() != rclcpp::ParameterType::PARAMETER_INTEGER) {
+            return std::nullopt;
+          }
+          CIntegerPtr value_node = node_map.GetNode(binding.node_name.c_str());
+          const std::int64_t current = value_node->GetValue();
+          std::int64_t increment = 1;
+          try {
+            increment = std::max<std::int64_t>(1, value_node->GetInc());
+          } catch (const Spinnaker::Exception &) {
+          }
+          const double tolerance = std::max<double>(
+            static_cast<double>(increment), 0.005 * std::abs(static_cast<double>(wanted.as_int())));
+          return std::abs(static_cast<double>(current - wanted.as_int())) <= tolerance ?
+                 std::nullopt : std::optional<std::string>(std::to_string(current));
+        }
+        case ControlValueKind::Float:
+        {
+          if (wanted.get_type() != rclcpp::ParameterType::PARAMETER_DOUBLE) {
+            return std::nullopt;
+          }
+          CFloatPtr value_node = node_map.GetNode(binding.node_name.c_str());
+          const double current = value_node->GetValue();
+          const double tolerance = std::max(1e-6, 0.005 * std::abs(wanted.as_double()));
+          if (std::abs(current - wanted.as_double()) <= tolerance) {
+            return std::nullopt;
+          }
+          std::ostringstream text;
+          text << current;
+          return text.str();
+        }
+        case ControlValueKind::Enumeration:
+        {
+          if (wanted.get_type() != rclcpp::ParameterType::PARAMETER_STRING) {
+            return std::nullopt;
+          }
+          CEnumerationPtr value_node = node_map.GetNode(binding.node_name.c_str());
+          const std::string current = value_node->ToString().c_str();
+          return current == wanted.as_string() ? std::nullopt : std::optional<std::string>(current);
+        }
+        case ControlValueKind::String:
+        {
+          if (wanted.get_type() != rclcpp::ParameterType::PARAMETER_STRING) {
+            return std::nullopt;
+          }
+          CStringPtr value_node = node_map.GetNode(binding.node_name.c_str());
+          const std::string current = value_node->GetValue().c_str();
+          return current == wanted.as_string() ? std::nullopt : std::optional<std::string>(current);
+        }
+      }
+    } catch (const Spinnaker::Exception &) {
+    }
+    return std::nullopt;
+  }
+
+  // Read back every configured camera.* / stream.* / tl_device.* override once the whole startup
+  // sequence has run, just before streaming (TL parameters lock while streaming). A value can be
+  // written and still not stay: two GenICam nodes that are one register pair recompute each other,
+  // and overrides of the same type go in name order. On 2026-09-22 DeviceLinkThroughputLimit
+  // 75000000 went in before GevSCPD 0, the camera recomputed the limit to 125000000 on 13 of 14
+  // cameras, and the simultaneous PTP-action bursts overflowed the switch — frames and GVCP
+  // replies were lost and every camera came and went. Re-apply what drifted once, in priority
+  // order, then report what still does not match.
+  void VerifyControlOverridesTookEffect()
+  {
+    auto find_drift = [this]() {
+        std::vector<std::pair<rclcpp::Parameter, std::string>> drift;
+        for (const auto & entry : get_node_parameters_interface()->get_parameter_overrides()) {
+          const std::string & name = entry.first;
+          const auto binding = control_bindings_.find(name);
+          if (binding == control_bindings_.end() || IsSetByStartupLogic(binding->second.node_name) ||
+            IsManagedControlNode(binding->second.map_kind, binding->second.node_name))
+          {
+            continue;
+          }
+          rclcpp::Parameter wanted;
+          if (!get_parameter(name, wanted)) {
+            continue;
+          }
+          if (const auto current = ControlValueMismatch(binding->second, wanted)) {
+            drift.emplace_back(wanted, *current);
+          }
+        }
+        // Priority order like the startup pass, but the link limit last: GevSCPD and the packet size
+        // recompute it, so whatever of those drifted has to be back in place before it.
+        auto rank = [this](const rclcpp::Parameter & parameter) {
+            const auto & binding = control_bindings_.at(parameter.get_name());
+            return ControlOverridePriority(binding) * 2 +
+                   (binding.node_name == "DeviceLinkThroughputLimit" ? 1 : 0);
+          };
+        std::stable_sort(
+          drift.begin(), drift.end(),
+          [&rank](const auto & lhs, const auto & rhs) {return rank(lhs.first) < rank(rhs.first);});
+        return drift;
+      };
+
+    const auto drift = find_drift();
+    if (drift.empty()) {
+      return;
+    }
+    std::string fixed_text;
+    for (const auto & [wanted, current] : drift) {
+      try {
+        ApplyControlParameterValue(control_bindings_.at(wanted.get_name()), wanted);
+      } catch (const std::exception &) {
+      }
+      fixed_text += (fixed_text.empty() ? "" : ", ") + wanted.get_name() + " (" + current + " -> " +
+        wanted.value_to_string() + ")";
+    }
+
+    const auto still = find_drift();
+    std::string still_text;
+    for (const auto & [wanted, current] : still) {
+      still_text += (still_text.empty() ? "" : ", ") + wanted.get_name() + "=" +
+        wanted.value_to_string() + " but camera has " + current;
+    }
+    if (still.size() < drift.size()) {
+      RCLCPP_WARN(
+        get_logger(),
+        "Re-applied %zu startup camera setting(s) that another setting had overwritten: %s",
+        drift.size() - still.size(),
+        fixed_text.c_str());
+    }
+    if (!still.empty()) {
+      RCLCPP_ERROR(
+        get_logger(),
+        "%zu startup camera setting(s) not in effect after startup — the camera changed or "
+        "rejected them: %s",
+        still.size(),
+        still_text.c_str());
+    }
   }
 
   static int ControlOverridePriority(const ControlBinding & binding)
@@ -1483,6 +1769,8 @@ private:
     RegisterWritableControlParameters(*tl_device_node_map_, ControlMapKind::TlDevice);
     NormalizeFrameRateStartupOverrides();
     ApplyPendingControlOverrides();
+    RegisterControlParametersUnlockedByOverrides();
+    ReportIgnoredControlOverrides();
 
     control_parameter_callback_handle_ = add_on_set_parameters_callback(
       std::bind(&FlirSpinnakerCameraNode::OnSetControlParameters, this, std::placeholders::_1));
@@ -1622,6 +1910,8 @@ private:
     ApplyPtpConfiguration(node_map);
     ApplyHardwareTriggerConfiguration(node_map);
     ApplyPtpActionConfiguration(node_map);
+    ApplyChunkData(node_map);
+    VerifyControlOverridesTookEffect();
 
     const std::string selected_serial = SafeNodeString(tl_node_map, "DeviceSerialNumber");
     const std::string selected_model = SafeNodeString(tl_node_map, "DeviceModelName");
@@ -2490,16 +2780,43 @@ private:
         std::chrono::duration_cast<std::chrono::steady_clock::duration>(
           std::chrono::duration<double>(ptp_action_log_interval_sec_));
 
+      // Trigger grid on PTP time (ptp_action.align_to_second): action n fires at exactly n / rate
+      // seconds of PTP time, so every second starts on a shot (0, 1/30, 2/30 … s at 30 Hz) and the
+      // shots of every run land on the same instants. A lidar phase-locked to the same PTP clock
+      // (phase_lock_enable) then always faces the same direction when the cameras fire. Before, the
+      // grid started at whatever camera_now + schedule_ahead was when the sender began, so the
+      // lidar-to-camera relation changed from run to run. Slot times come from whole seconds plus
+      // an integer fraction, so they do not drift the way repeated 33333333-tick steps did
+      // (10 ns short per second). Only for whole-number rates; otherwise the old free grid.
+      const double rate_rounded = std::round(ptp_action_rate_hz_);
+      const bool aligned = ptp_action_align_to_second_ && rate_rounded >= 1.0 &&
+        std::abs(ptp_action_rate_hz_ - rate_rounded) < 1e-9 && tick_frequency > 0U;
+      const std::uint64_t rate_int = aligned ? static_cast<std::uint64_t>(rate_rounded) : 1U;
+      auto slot_time = [&](std::uint64_t slot) {
+          return (slot / rate_int) * tick_frequency +
+                 ((slot % rate_int) * tick_frequency + rate_int / 2U) / rate_int;
+        };
+      auto first_slot_at_or_after = [&](std::uint64_t ticks) {
+          std::uint64_t slot = (ticks / tick_frequency) * rate_int +
+            ((ticks % tick_frequency) * rate_int + tick_frequency - 1U) / tick_frequency;
+          while (slot_time(slot) < ticks) {
+            ++slot;
+          }
+          return slot;
+        };
+
       std::uint64_t next_action_time = 0U;
+      std::uint64_t next_slot = 0U;
       std::uint64_t sent_count = 0U;
       auto next_send_time = std::chrono::steady_clock::now();
       auto next_log_time = std::chrono::steady_clock::now();
 
       RCLCPP_INFO(
         get_logger(),
-        "PTP action sender started: rate=%.3f Hz, schedule_ahead=%.3f ms.",
+        "PTP action sender started: rate=%.3f Hz, schedule_ahead=%.3f ms, grid=%s.",
         ptp_action_rate_hz_,
-        ptp_action_schedule_ahead_ms_);
+        ptp_action_schedule_ahead_ms_,
+        aligned ? "aligned to PTP seconds (shot n at n/rate s)" : "free (starts at camera time + schedule_ahead)");
 
       std::uint64_t consecutive_failures = 0U;
 
@@ -2515,8 +2832,31 @@ private:
             std::numeric_limits<std::uint64_t>::max() :
             camera_now + schedule_ahead_ticks;
 
-          if (next_action_time < earliest_action_time) {
+          const bool behind = next_action_time < earliest_action_time;
+          const bool ahead = !behind && next_action_time - earliest_action_time > 5U * period_ticks;
+          if (behind && !aligned) {
             next_action_time = earliest_action_time;
+          } else if (behind) {
+            next_slot = first_slot_at_or_after(earliest_action_time);
+            next_action_time = slot_time(next_slot);
+          } else if (ahead) {
+            // The schedule is ahead of the camera clock — the clock stepped back (a PTP
+            // correction, or one bad latch read that pushed the schedule forward). Only the
+            // behind case used to re-anchor, so on 2026-09-22 (Orin GNSS grandmaster) the
+            // schedule stayed 14.1 s in the future for good: each camera queued 10 actions,
+            // fired them 14 s later as a 10-frame burst, and sent nothing in between.
+            RCLCPP_WARN(
+              get_logger(),
+              "PTP action schedule was %.3f s ahead of the camera clock (the clock stepped back); "
+              "re-anchoring to camera time + schedule_ahead.",
+              static_cast<double>(next_action_time - earliest_action_time) /
+              static_cast<double>(tick_frequency));
+            if (aligned) {
+              next_slot = first_slot_at_or_after(earliest_action_time);
+              next_action_time = slot_time(next_slot);
+            } else {
+              next_action_time = earliest_action_time;
+            }
           }
 
           SendScheduledActionCommand(next_action_time);
@@ -2540,10 +2880,15 @@ private:
             next_log_time = now_time + log_interval;
           }
 
-          next_action_time =
-            (std::numeric_limits<std::uint64_t>::max() - next_action_time < period_ticks) ?
-            earliest_action_time :
-            next_action_time + period_ticks;
+          if (aligned) {
+            ++next_slot;
+            next_action_time = slot_time(next_slot);
+          } else {
+            next_action_time =
+              (std::numeric_limits<std::uint64_t>::max() - next_action_time < period_ticks) ?
+              earliest_action_time :
+              next_action_time + period_ticks;
+          }
         } catch (const std::exception & exception) {
           ++consecutive_failures;
           RCLCPP_ERROR_THROTTLE(
@@ -3258,15 +3603,31 @@ private:
     return msg;
   }
 
+  // What ReadFrameInfo found for one frame (chunk data, or the GVSP leader).
+  struct FrameInfo
+  {
+    std::uint64_t frame_id{0};
+    std::uint64_t timestamp_ns{0};
+    std::int64_t exposure_ns{-1};   // this frame's own ExposureTime (chunk), -1 = unknown
+    bool stale{false};              // did not advance: an older frame's leader values, not this frame's
+    std::uint64_t skipped_before{0};  // incomplete frames dropped since the previous published frame
+  };
+
   rclcpp::Time ResolveHeaderStamp(
-    const ImagePtr & image,
+    const FrameInfo & info,
     const rclcpp::Time & fallback_stamp)
   {
-    if (!use_camera_timestamp_in_header_ || camera_timestamp_header_disabled_due_to_instability_) {
+    if (timestamp_mode_ == "camera_latched") {
+      return ResolveLatchedStamp(info, fallback_stamp);
+    }
+    if (timestamp_mode_ != "camera_first_frame" || camera_timestamp_header_disabled_due_to_instability_) {
       return fallback_stamp;
     }
+    if (info.stale) {
+      return fallback_stamp;          // an old frame's timestamp (see ReadFrameInfo) — not this frame's
+    }
 
-    const std::uint64_t camera_timestamp_ns = image->GetTimeStamp();
+    const std::uint64_t camera_timestamp_ns = info.timestamp_ns;
     if (camera_timestamp_ns == 0U ||
       camera_timestamp_ns > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
     {
@@ -3294,9 +3655,455 @@ private:
       get_clock()->get_clock_type());
   }
 
+  // ---------- header.stamp = exposure start, mapped from the camera clock ----------
+  //
+  // Without PTP on the cameras, Image::GetTimeStamp() is each camera's own counter since
+  // power-on. timestamp.mode=camera_latched moves it onto the host clock: every
+  // timestamp.latch_interval_sec a TimestampLatch command is bracketed by two host clock
+  // reads, which pins one counter value to a host time within half the GVCP round trip
+  // (well under a millisecond). A line through recent samples gives offset and drift.
+  //
+  // Per frame, the exposure start (the camera timestamp, minus ExposureTime when the camera
+  // latches at exposure end) is mapped onto the host clock. When the trigger pulses sit on a
+  // fixed grid of the host clock (a PPS-locked N Hz pulse train and a host clock disciplined
+  // to the same GNSS, e.g. via PTP), timestamp.trigger_grid_hz snaps that estimate to the
+  // nearest grid instant — the trigger edge itself, identical for every camera. The distance
+  // to the grid is logged; if it is not ~0 the grid assumption does not hold.
+
+  struct ClockSample
+  {
+    std::int64_t camera_ns;
+    std::int64_t host_ns;
+    std::int64_t rtt_ns;
+  };
+
+  struct ClockMapping
+  {
+    std::int64_t camera_ref_ns{0};
+    std::int64_t host_ref_ns{0};
+    long double slope{1.0L};
+    bool valid{false};
+  };
+
+  static std::int64_t MapCameraToHost(const ClockMapping & mapping, std::int64_t camera_ns)
+  {
+    return mapping.host_ref_ns +
+           static_cast<std::int64_t>(std::llround(
+             static_cast<double>(mapping.slope * static_cast<long double>(camera_ns - mapping.camera_ref_ns))));
+  }
+
+  static ClockMapping FitClockMapping(const std::deque<ClockSample> & samples)
+  {
+    ClockMapping mapping;
+    if (samples.empty()) {
+      return mapping;
+    }
+    std::int64_t min_rtt = std::numeric_limits<std::int64_t>::max();
+    for (const auto & sample : samples) {
+      min_rtt = std::min(min_rtt, sample.rtt_ns);
+    }
+    // Samples whose round trip was much slower than the best one pin the latch less tightly.
+    std::vector<const ClockSample *> good;
+    for (const auto & sample : samples) {
+      if (sample.rtt_ns <= 2 * min_rtt + 200000) {
+        good.push_back(&sample);
+      }
+    }
+    const ClockSample & anchor = *good.back();
+    mapping.camera_ref_ns = anchor.camera_ns;
+    mapping.host_ref_ns = anchor.host_ns;
+    mapping.valid = true;
+    if (good.size() < 3 || good.back()->camera_ns - good.front()->camera_ns < 1000000000LL) {
+      return mapping;
+    }
+    long double sx = 0.0L, sy = 0.0L, sxx = 0.0L, sxy = 0.0L;
+    const long double n = static_cast<long double>(good.size());
+    for (const ClockSample * sample : good) {
+      const long double x = static_cast<long double>(sample->camera_ns - anchor.camera_ns);
+      const long double y = static_cast<long double>(sample->host_ns - anchor.host_ns);
+      sx += x;
+      sy += y;
+      sxx += x * x;
+      sxy += x * y;
+    }
+    const long double denominator = n * sxx - sx * sx;
+    if (denominator <= 0.0L) {
+      return mapping;
+    }
+    const long double slope = (n * sxy - sx * sy) / denominator;
+    if (std::fabs(static_cast<double>(slope - 1.0L)) > 1e-3) {
+      return mapping;          // oscillators differ by ppm, not per mille — a bad fit, keep offset only
+    }
+    mapping.slope = slope;
+    mapping.host_ref_ns += static_cast<std::int64_t>(std::llround(static_cast<double>((sy - slope * sx) / n)));
+    return mapping;
+  }
+
+  // ---------- per-frame info: chunk data instead of the GVSP leader ----------
+  //
+  // Image::GetFrameID() / GetTimeStamp() come from the frame's GVSP leader packet. When the leader is lost
+  // but the payload arrives, the frame is complete (IsIncomplete() is false) and the pixels are new, yet
+  // the recycled buffer keeps the frame ID and timestamp of the frame that used it one buffer ring
+  // earlier: stream.StreamBufferCountManual = 32 -> 32 frames, ~1 s at 30 Hz. Seen on the rig on the
+  // cameras that were losing packets. Chunk data rides inside the payload, so the FrameID / Timestamp /
+  // ExposureTime read from it belong to the pixels they arrived with.
+  void ApplyChunkData(INodeMap & node_map)
+  {
+    chunk_timestamp_ = chunk_frame_id_ = chunk_exposure_ = false;
+    if (!chunk_data_enable_) {
+      return;
+    }
+    try {
+      CBooleanPtr mode = node_map.GetNode("ChunkModeActive");
+      CEnumerationPtr selector = node_map.GetNode("ChunkSelector");
+      if (!IsWritable(mode) || !IsWritable(selector)) {
+        RCLCPP_WARN(
+          get_logger(),
+          "Chunk data is not writable on this camera: frame ID / timestamp come from the GVSP leader "
+          "(an old frame's values after a lost leader).");
+        return;
+      }
+      const auto offered = [&](const char * name) {
+          return IsReadable(CEnumEntryPtr(selector->GetEntryByName(name)));
+        };
+      if (!offered("Timestamp") && !offered("FrameID") && !offered("ExposureTime")) {
+        RCLCPP_INFO(
+          get_logger(), "The camera offers no Timestamp/FrameID/ExposureTime chunk; chunk data stays off.");
+        return;
+      }
+      mode->SetValue(true);
+      const auto enable_chunk = [&](const char * name) {
+          CEnumEntryPtr entry = selector->GetEntryByName(name);
+          if (!IsReadable(entry)) {
+            return false;
+          }
+          selector->SetIntValue(entry->GetValue());
+          CBooleanPtr enable = node_map.GetNode("ChunkEnable");
+          if (IsWritable(enable)) {
+            enable->SetValue(true);
+            return true;
+          }
+          return IsReadable(enable) && enable->GetValue();
+        };
+      chunk_timestamp_ = enable_chunk("Timestamp");
+      chunk_frame_id_ = enable_chunk("FrameID");
+      chunk_exposure_ = enable_chunk("ExposureTime");
+      RCLCPP_INFO(
+        get_logger(), "Chunk data: Timestamp=%s FrameID=%s ExposureTime=%s",
+        chunk_timestamp_ ? "on" : "n/a", chunk_frame_id_ ? "on" : "n/a", chunk_exposure_ ? "on" : "n/a");
+    } catch (const Spinnaker::Exception & exception) {
+      RCLCPP_WARN(get_logger(), "Could not enable chunk data (%s); using the GVSP leader.", exception.what());
+    }
+  }
+
+  // Called on the acquisition thread only.
+  FrameInfo ReadFrameInfo(const ImagePtr & image)
+  {
+    FrameInfo info;
+    info.frame_id = image->GetFrameID();
+    info.timestamp_ns = image->GetTimeStamp();
+    info.skipped_before = skipped_since_last_frame_;
+    skipped_since_last_frame_ = 0U;
+    if (chunk_timestamp_ || chunk_frame_id_ || chunk_exposure_) {
+      try {
+        const Spinnaker::ChunkData chunk = image->GetChunkData();
+        if (chunk_timestamp_) {
+          const std::int64_t timestamp = chunk.GetTimestamp();
+          // First frame: the chunk counter must be the same clock as the leader's (same units and
+          // epoch) — otherwise mixing them breaks the camera->host mapping. Stop using it if not.
+          if (!chunk_timestamp_checked_ && timestamp > 0) {
+            chunk_timestamp_checked_ = true;
+            const long double gap = std::fabs(
+              static_cast<long double>(timestamp) - static_cast<long double>(info.timestamp_ns));
+            if (gap > 1.0e8L) {
+              chunk_timestamp_ = false;
+              RCLCPP_WARN(
+                get_logger(), "Chunk Timestamp (%lld) is not on the leader timestamp's clock (%llu); "
+                "using the leader timestamp.", static_cast<long long>(timestamp),
+                static_cast<unsigned long long>(info.timestamp_ns));
+            }
+          }
+          if (chunk_timestamp_ && timestamp > 0) {
+            info.timestamp_ns = static_cast<std::uint64_t>(timestamp);
+          }
+        }
+        if (chunk_frame_id_) {
+          const std::int64_t frame_id = chunk.GetFrameID();
+          if (frame_id >= 0) {
+            info.frame_id = static_cast<std::uint64_t>(frame_id);
+          }
+        }
+        if (chunk_exposure_) {
+          const double exposure_us = chunk.GetExposureTime();
+          if (std::isfinite(exposure_us) && exposure_us > 0.0) {
+            info.exposure_ns = static_cast<std::int64_t>(std::llround(exposure_us * 1000.0));
+          }
+        }
+      } catch (const Spinnaker::Exception &) {
+      }
+    }
+
+    if (last_frame_timestamp_ns_ != 0U && info.timestamp_ns <= last_frame_timestamp_ns_) {
+      info.stale = true;
+      ++stale_frames_;
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 10000,
+        "Frame info did not advance (frame_id %llu, timestamp %.3f s behind the previous frame; %llu such "
+        "frames so far). The frame's GVSP leader was probably lost while its payload arrived, and the "
+        "buffer kept an older frame's info. %s",
+        static_cast<unsigned long long>(info.frame_id),
+        static_cast<double>(last_frame_timestamp_ns_ - info.timestamp_ns) / 1e9,
+        static_cast<unsigned long long>(stale_frames_),
+        chunk_timestamp_ ? "" : "Chunk data would carry the right values (chunk_data.enable).");
+      return info;
+    }
+    if (last_frame_timestamp_ns_ != 0U) {
+      // Trigger period = median of recent intervals between good frames (a dropped frame is one 2x interval).
+      frame_intervals_ns_.push_back(static_cast<std::int64_t>(info.timestamp_ns - last_frame_timestamp_ns_));
+      while (frame_intervals_ns_.size() > 31U) {
+        frame_intervals_ns_.pop_front();
+      }
+      std::vector<std::int64_t> sorted(frame_intervals_ns_.begin(), frame_intervals_ns_.end());
+      std::nth_element(sorted.begin(), sorted.begin() + sorted.size() / 2, sorted.end());
+      frame_period_ns_ = sorted[sorted.size() / 2];
+    }
+    last_frame_timestamp_ns_ = info.timestamp_ns;
+    return info;
+  }
+
+  void StartClockSync()
+  {
+    if (timestamp_mode_ != "camera_latched") {
+      return;
+    }
+    if (timestamp_latch_interval_sec_ <= 0.0) {
+      throw std::runtime_error("timestamp.latch_interval_sec must be > 0.");
+    }
+    if (timestamp_trigger_grid_hz_ < 0.0) {
+      throw std::runtime_error("timestamp.trigger_grid_hz must be >= 0 (0 = no snapping).");
+    }
+    next_grid_report_ = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    try {
+      clock_tick_frequency_ = ReadTimestampTickFrequency();
+    } catch (const std::exception & exception) {
+      RCLCPP_WARN(get_logger(), "%s Assuming 1 GHz timestamp ticks.", exception.what());
+    }
+    // A short burst so the mapping starts from the fastest of several round trips.
+    int latched = 0;
+    std::string last_error;
+    for (int i = 0; i < 5; ++i) {
+      try {
+        SampleCameraClock(clock_tick_frequency_);
+        ++latched;
+      } catch (const std::exception & exception) {
+        last_error = exception.what();
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    if (latched == 0) {
+      RCLCPP_ERROR(
+        get_logger(),
+        "timestamp.mode=camera_latched: the camera clock could not be latched (%s). header.stamp is host "
+        "receive time until a latch succeeds.", last_error.c_str());
+    }
+    RCLCPP_INFO(
+      get_logger(),
+      "header.stamp = exposure start from the camera clock (timestamp.mode=camera_latched): "
+      "exposure_latch=%s, capture_offset=%.3f ms, trigger grid %s, latch every %.1f s.",
+      timestamp_exposure_latch_.c_str(),
+      static_cast<double>(timestamp_capture_offset_ns_) / 1e6,
+      timestamp_trigger_grid_hz_ > 0.0 ?
+      (std::to_string(timestamp_trigger_grid_hz_) + " Hz").c_str() : "off",
+      timestamp_latch_interval_sec_);
+    clock_sync_thread_ = std::thread(&FlirSpinnakerCameraNode::ClockSyncLoop, this);
+  }
+
+  // StartClockSync already took the first samples; this keeps the mapping following the drift.
+  void ClockSyncLoop()
+  {
+    std::uint64_t failures = 0U;
+    while (rclcpp::ok() && running_.load()) {
+      const auto until = std::chrono::steady_clock::now() +
+        std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+        std::chrono::duration<double>(timestamp_latch_interval_sec_));
+      while (running_.load() && std::chrono::steady_clock::now() < until) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      }
+      if (!running_.load()) {
+        break;
+      }
+      try {
+        SampleCameraClock(clock_tick_frequency_);
+        failures = 0U;
+      } catch (const std::exception & exception) {
+        ++failures;
+        if (failures == 1U || failures % 10U == 0U) {
+          RCLCPP_WARN(
+            get_logger(), "Camera clock latch failed (%lu in a row): %s",
+            static_cast<unsigned long>(failures), exception.what());
+        }
+      }
+    }
+  }
+
+  void SampleCameraClock(std::uint64_t tick_frequency)
+  {
+    if (camera_node_map_ == nullptr) {
+      throw std::runtime_error("camera node map is not available");
+    }
+    const std::int64_t before = now().nanoseconds();
+    if (!ExecuteCommandByName(*camera_node_map_, "TimestampLatch")) {
+      throw std::runtime_error("TimestampLatch is not available/writable");
+    }
+    const std::int64_t after = now().nanoseconds();
+    const auto ticks = ReadIntegerNodeValue(*camera_node_map_, "TimestampLatchValue");
+    if (!ticks || *ticks < 0) {
+      throw std::runtime_error("TimestampLatchValue is not readable");
+    }
+    const std::int64_t camera_ns = tick_frequency == 1000000000ULL ? *ticks :
+      static_cast<std::int64_t>(std::llround(
+        static_cast<long double>(*ticks) * 1.0e9L / static_cast<long double>(tick_frequency)));
+    const ClockSample sample{camera_ns, before + (after - before) / 2, after - before};
+
+    // ExposureTime for the exposure-end correction. Read here, not per frame: a register read per
+    // frame is a GigE round trip per frame per camera. Under auto exposure it can lag by one interval.
+    if (const auto exposure_us =
+      ReadCameraNumericNodeValue({"ExposureTime", "ExposureTime_FloatVal", "ExposureTime_Val"}))
+    {
+      if (std::isfinite(*exposure_us) && *exposure_us >= 0.0) {
+        exposure_ns_.store(static_cast<std::int64_t>(std::llround(*exposure_us * 1000.0)));
+      }
+    }
+
+    std::lock_guard<std::mutex> lock(clock_mutex_);
+    if (clock_mapping_.valid && sample.rtt_ns < 5000000) {
+      // The host clock stepped (ptp4l/phc2sys correcting it): the old samples no longer fit. A real step
+      // persists, a slow latch reply (the A70 in particular) does not — so one outlier is dropped and only
+      // a second sample off by the same amount restarts the mapping. Resetting on every outlier made the
+      // A70 stamps jump by several ms every few minutes (2026-09-22: 4 resets per A70 in ~40 min).
+      const std::int64_t jump = sample.host_ns - MapCameraToHost(clock_mapping_, sample.camera_ns);
+      if (std::llabs(jump) > 5000000) {
+        if (!pending_clock_jump_ || std::llabs(jump - pending_clock_jump_ns_) > 2000000) {
+          pending_clock_jump_ = true;
+          pending_clock_jump_ns_ = jump;
+          return;
+        }
+        RCLCPP_WARN(
+          get_logger(),
+          "Host clock moved %.3f ms against the camera clock (two samples in a row — clock step). "
+          "Restarting the camera->host timestamp mapping.", static_cast<double>(jump) / 1e6);
+        clock_samples_.clear();
+      }
+      pending_clock_jump_ = false;
+    }
+    clock_samples_.push_back(sample);
+    while (clock_samples_.size() > 16U) {
+      clock_samples_.pop_front();
+    }
+    clock_mapping_ = FitClockMapping(clock_samples_);
+  }
+
+  rclcpp::Time ResolveLatchedStamp(const FrameInfo & info, const rclcpp::Time & fallback_stamp)
+  {
+    const std::uint64_t camera_timestamp_ns = info.timestamp_ns;
+    ClockMapping mapping;
+    {
+      std::lock_guard<std::mutex> lock(clock_mutex_);
+      mapping = clock_mapping_;
+    }
+    if (!mapping.valid || camera_timestamp_ns == 0U ||
+      camera_timestamp_ns > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
+    {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 5000,
+        "timestamp.mode=camera_latched: no camera clock sample yet; header.stamp is host receive time.");
+      return fallback_stamp;
+    }
+
+    std::int64_t exposure_start_ns = static_cast<std::int64_t>(camera_timestamp_ns);
+    if (info.stale) {
+      // This frame carries an older frame's timestamp (ReadFrameInfo). Its pixels are new: it is the trigger
+      // after the previous published frame, plus any incomplete frames dropped in between. (Counting
+      // triggers from the host arrival spacing instead mis-counts whenever OldestFirst dequeues a backlog.)
+      if (last_exposure_start_ns_ == 0 || frame_period_ns_ <= 0) {
+        return fallback_stamp;
+      }
+      const std::int64_t steps = 1 + static_cast<std::int64_t>(info.skipped_before);
+      exposure_start_ns = last_exposure_start_ns_ + steps * frame_period_ns_;
+    } else if (timestamp_exposure_latch_ == "end") {
+      // The frame's own exposure from its chunk; else the clock thread's periodic register read.
+      const std::int64_t exposure_ns = info.exposure_ns >= 0 ? info.exposure_ns : exposure_ns_.load();
+      if (exposure_ns < 0) {
+        RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), 5000,
+          "timestamp.exposure_latch=end but ExposureTime is not known yet; header.stamp is host receive time.");
+        return fallback_stamp;
+      }
+      exposure_start_ns -= exposure_ns;
+    }
+    if (!info.stale) {
+      // A fixed delay between the moment the frame represents and the camera's timestamp — for a
+      // microbolometer (no exposure) the detector time constant plus in-camera processing. Measured.
+      exposure_start_ns -= timestamp_capture_offset_ns_;
+    }
+    last_exposure_start_ns_ = exposure_start_ns;
+
+    std::int64_t stamp_ns = MapCameraToHost(mapping, exposure_start_ns);
+    if (timestamp_trigger_grid_hz_ > 0.0) {
+      const long double period = 1.0e9L / static_cast<long double>(timestamp_trigger_grid_hz_);
+      const long double slot = std::round(
+        static_cast<long double>(stamp_ns - timestamp_trigger_grid_offset_ns_) / period);
+      const std::int64_t snapped = timestamp_trigger_grid_offset_ns_ +
+        static_cast<std::int64_t>(std::llround(slot * period));
+      TrackGridResidual(stamp_ns - snapped);
+      stamp_ns = snapped;
+    }
+
+    if (last_header_stamp_ns_ != 0 && stamp_ns <= last_header_stamp_ns_) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 5000,
+        "header.stamp did not advance (%.3f ms vs the previous frame): the camera->host mapping or "
+        "the trigger grid is off.", static_cast<double>(stamp_ns - last_header_stamp_ns_) / 1e6);
+    }
+    last_header_stamp_ns_ = stamp_ns;
+    return rclcpp::Time(stamp_ns, get_clock()->get_clock_type());
+  }
+
+  // Called on the acquisition thread only.
+  void TrackGridResidual(std::int64_t residual_ns)
+  {
+    grid_residuals_ns_.push_back(residual_ns);
+    const auto now_steady = std::chrono::steady_clock::now();
+    if (now_steady < next_grid_report_ || grid_residuals_ns_.empty()) {
+      return;
+    }
+    next_grid_report_ = now_steady + std::chrono::seconds(30);
+    std::vector<std::int64_t> sorted = grid_residuals_ns_;
+    std::sort(sorted.begin(), sorted.end());
+    const double median_ms = static_cast<double>(sorted[sorted.size() / 2]) / 1e6;
+    const double worst_ms = static_cast<double>(
+      std::max(std::llabs(sorted.front()), std::llabs(sorted.back()))) / 1e6;
+    if (std::fabs(median_ms) > timestamp_grid_warn_ms_) {
+      RCLCPP_WARN(
+        get_logger(),
+        "header.stamp is snapped to the %.3f Hz trigger grid, but frames land %.3f ms from it "
+        "(median of %zu, worst %.3f ms). The grid assumption does not hold: the trigger pulses are not "
+        "on that grid of the host clock (not PPS-locked, or offset -> timestamp.trigger_grid_offset_ns), "
+        "the host clock is not synced to the same GNSS, or timestamp.exposure_latch is wrong.",
+        timestamp_trigger_grid_hz_, median_ms, sorted.size(), worst_ms);
+    } else {
+      RCLCPP_INFO(
+        get_logger(),
+        "header.stamp on the %.3f Hz trigger grid: frames land %.3f ms from it (median of %zu, worst %.3f ms).",
+        timestamp_trigger_grid_hz_, median_ms, sorted.size(), worst_ms);
+    }
+    grid_residuals_ns_.clear();
+  }
+
   flir_spinnaker_camera::msg::FlirMetadata BuildMetadataMessage(
     const ImagePtr & original_image,
     const PreparedRawImage & raw_image,
+    const FrameInfo & info,
     const rclcpp::Time & stamp) const
   {
     flir_spinnaker_camera::msg::FlirMetadata msg;
@@ -3307,14 +4114,16 @@ private:
     msg.step = static_cast<std::uint32_t>(raw_image.image->GetStride());
     msg.encoding = raw_image.encoding;
     msg.pixel_format = original_image->GetPixelFormatName().c_str();
-    msg.camera_frame_id = original_image->GetFrameID();
-    msg.camera_timestamp_ns = original_image->GetTimeStamp();
+    // Chunk values when the camera sends them (right even after a lost leader), else the leader's.
+    msg.camera_frame_id = info.frame_id;
+    msg.camera_timestamp_ns = info.timestamp_ns;
     msg.acquisition_frame_rate_enable =
       ReadCameraBooleanNodeValue({"AcquisitionFrameRateEnable"}).value_or(false);
     msg.acquisition_frame_rate_hz =
       ReadCameraNumericNodeValue({"AcquisitionFrameRate", "FrameRateHz_Val"}).value_or(std::nan(""));
     msg.exposure_auto = ReadCameraTextNodeValue({"ExposureAuto"}).value_or("");
-    msg.exposure_time_us =
+    // The frame's own exposure when chunk data carries it; otherwise the register as of now.
+    msg.exposure_time_us = info.exposure_ns >= 0 ? static_cast<double>(info.exposure_ns) / 1000.0 :
       ReadCameraNumericNodeValue({"ExposureTime", "ExposureTime_FloatVal", "ExposureTime_Val"}).value_or(std::nan(""));
     msg.gain_auto = ReadCameraTextNodeValue({"GainAuto"}).value_or("");
     msg.gain_db = ReadCameraNumericNodeValue({"Gain", "GainDB_Val", "Gain_Val"}).value_or(std::nan(""));
@@ -3368,12 +4177,14 @@ private:
             5000,
             "Incomplete image received. status=%d",
             static_cast<int>(image->GetImageStatus()));
+          ++skipped_since_last_frame_;       // a trigger that produced no published frame
           image->Release();
           continue;
         }
 
         const rclcpp::Time host_stamp = now();
-        const rclcpp::Time stamp = ResolveHeaderStamp(image, host_stamp);
+        const FrameInfo info = ReadFrameInfo(image);
+        const rclcpp::Time stamp = ResolveHeaderStamp(info, host_stamp);
 
         if (publish_raw_ || publish_camera_info_ || publish_metadata_) {
           const auto raw_spec = RawOutputSpecForPixelFormat(image->GetPixelFormat());
@@ -3397,7 +4208,7 @@ private:
             }
 
             if (publish_metadata_) {
-              metadata_pub_->publish(BuildMetadataMessage(image, raw_image, stamp));
+              metadata_pub_->publish(BuildMetadataMessage(image, raw_image, info, stamp));
             }
           }
         }
@@ -3466,6 +4277,10 @@ private:
       ptp_action_thread_.join();
     }
 
+    if (clock_sync_thread_.joinable()) {
+      clock_sync_thread_.join();
+    }
+
     if (camera_) {
       try {
         if (acquisition_started_) {
@@ -3515,6 +4330,14 @@ private:
   int camera_init_retry_delay_ms_;
   int acquisition_timeout_ms_;
   bool use_camera_timestamp_in_header_;
+  std::string timestamp_mode_;
+  std::string timestamp_exposure_latch_;
+  double timestamp_trigger_grid_hz_;
+  std::int64_t timestamp_trigger_grid_offset_ns_;
+  double timestamp_grid_warn_ms_;
+  std::int64_t timestamp_capture_offset_ns_;
+  double timestamp_latch_interval_sec_;
+  bool chunk_data_enable_;
   std::string camera_info_yaml_path_;
   bool auto_pixel_format_;
   std::string pixel_format_;
@@ -3556,6 +4379,7 @@ private:
   double ptp_action_rate_hz_;
   double ptp_action_schedule_ahead_ms_;
   double ptp_action_start_delay_ms_;
+  bool ptp_action_align_to_second_;
   bool ptp_action_request_ack_;
   int ptp_action_expected_ack_count_;
   double ptp_action_log_interval_sec_;
@@ -3574,6 +4398,28 @@ private:
   bool camera_timestamp_header_disabled_due_to_instability_ = false;
   std::uint64_t last_camera_timestamp_ns_ = 0U;
   std::int64_t header_stamp_offset_ns_ = 0;
+  // timestamp.mode=camera_latched — samples/mapping shared with the clock sync thread
+  std::mutex clock_mutex_;
+  std::deque<ClockSample> clock_samples_;
+  ClockMapping clock_mapping_;
+  std::atomic<std::int64_t> exposure_ns_{-1};
+  std::uint64_t clock_tick_frequency_{1000000000ULL};
+  bool pending_clock_jump_{false};          // clock sync thread only (under clock_mutex_)
+  std::int64_t pending_clock_jump_ns_{0};
+  // chunk data / frame info (acquisition thread)
+  bool chunk_timestamp_{false};
+  bool chunk_frame_id_{false};
+  bool chunk_exposure_{false};
+  bool chunk_timestamp_checked_{false};
+  std::uint64_t last_frame_timestamp_ns_{0};
+  std::uint64_t stale_frames_{0};
+  std::deque<std::int64_t> frame_intervals_ns_;
+  std::int64_t frame_period_ns_{0};
+  std::int64_t last_exposure_start_ns_{0};
+  std::uint64_t skipped_since_last_frame_{0};
+  std::int64_t last_header_stamp_ns_ = 0;
+  std::vector<std::int64_t> grid_residuals_ns_;
+  std::chrono::steady_clock::time_point next_grid_report_{};
   std::string camera_info_distortion_model_;
   std::vector<double> camera_info_d_;
   std::array<double, 9> camera_info_k_{};
@@ -3607,6 +4453,7 @@ private:
   bool acquisition_started_{false};
   std::thread acquisition_thread_;
   std::thread ptp_action_thread_;
+  std::thread clock_sync_thread_;
 };
 
 int main(int argc, char ** argv)

@@ -18,6 +18,35 @@ flir_camera:
     # true면 카메라 frame timestamp를 ROS 시간축에 맞춰 쓰려고 시도하지만,
     # 일부 GigE/PTP 환경에서는 카메라 timestamp가 비단조로 보여 header가 불안정할 수 있음.
     use_camera_timestamp_in_header: false
+    # header.stamp 의 기준. 설정하면 use_camera_timestamp_in_header 보다 우선한다 (비워 두면 그걸 따른다).
+    #   host               : 수신 시점의 host now() — 전송·버퍼 지연만큼 늦고, 같은 트리거라도 카메라마다 수~수십 ms 다르다
+    #   camera_latched     : 노출 시작 시각. 카메라 카운터를 주기적으로 래치(TimestampLatch)해 host 시계로 옮긴다.
+    #                        카메라 PTP 가 필요 없고 오차는 GVCP 왕복의 절반 (1 ms 미만)
+    #   camera_first_frame : use_camera_timestamp_in_header=true 의 예전 동작 (첫 프레임 도착 시각에 고정)
+    # image_raw · camera_info · image_raw/metadata · image_rgb/compressed 가 모두 이 한 값을 header.stamp 로 쓴다.
+    # (metadata 의 camera_timestamp_ns 는 카메라 카운터 원본 그대로 남는다.)
+    timestamp.mode: "camera_latched"
+    # 카메라가 타임스탬프를 찍는 순간. 이 리그의 Blackfly S 는 노출이 *끝날 때* 찍는다 — 아래 ExposureTime 주석의
+    # 실측 (노출 15 ms 두 대가 1 ms 인 나머지보다 ~14 ms 늦게 찍힘). end 면 ExposureTime 을 빼서 노출 시작으로 되돌린다.
+    timestamp.exposure_latch: "end"
+    # 트리거 펄스가 host 시계의 일정한 격자 위에 있을 때(GNSS PPS 에 위상을 맞춘 N Hz 펄스 + host 시계가 같은 GNSS 에
+    # PTP 로 맞춰짐) 그 격자로 스냅한다 — header.stamp = 트리거 엣지 시각, 모든 카메라가 같은 값. 0 이면 스냅 안 함.
+    # 격자에서 얼마나 떨어져 있었는지 30초마다 로그에 남고, grid_warn_ms 를 넘으면 경고한다 (격자 가정이 틀렸다는 뜻).
+    timestamp.trigger_grid_hz: 0.0
+    # 노출과 별개로 빼는 고정 지연 (ns) — 트리거 엣지에서 노출 시작까지 (Blackfly S 는 µs 단위라 0).
+    # 열화상 A70 은 thermal_camera.yaml 에서 이 값으로 열 시정수 + 처리 지연을 뺀다.
+    timestamp.capture_offset_ns: 0
+    # 트리거 엣지가 격자(매 초 정각 + k/N 초)에서 일정하게 밀려 있으면 그만큼 (ns)
+    timestamp.trigger_grid_offset_ns: 0
+    # 스냅 전 추정 시각이 격자에서 이만큼(ms) 넘게 떨어져 있으면 경고 — 격자 가정 · 래치 설정 · 시계 동기 중 하나가 틀림
+    timestamp.grid_warn_ms: 3.0
+    # 카메라 카운터 래치 주기. 발진기 드리프트(수십 ppm)는 최근 샘플들의 직선으로 따라간다.
+    timestamp.latch_interval_sec: 2.0
+    # 프레임 ID · 카메라 타임스탬프 · 노출 시간을 GVSP leader 가 아니라 이미지 payload 안의 chunk data 로 받는다.
+    # leader 패킷만 유실되면 영상은 새 프레임인데 frame_id/타임스탬프는 버퍼 한 바퀴(StreamBufferCountManual,
+    # 32장) 전 값이 남는다 — 리그에서 실제로 나왔다. chunk 는 그 프레임의 픽셀과 같이 와서 틀리지 않는다.
+    # 카메라가 지원하지 않으면 노드가 경고하고 leader 값을 쓴다.
+    chunk_data.enable: true
     # 비어 있지 않으면 flir_camera_calibration 이 저장한 YAML에서 camera_info.* 값을 읽어
     # /camera_info 퍼블리시에 바로 반영합니다.
     camera_info.yaml_path: "calibration/flir_camera_info.yaml"
@@ -52,7 +81,7 @@ flir_camera:
     pixel_format: "BayerRG8"
     # OldestFirst: 쌓인 프레임을 순서대로 처리. 끊김은 줄 수 있지만 지연이 늘 수 있음.
     # NewestOnly : 오래된 프레임을 버리고 최신 프레임 위주로 처리. 지연은 적지만 점프처럼 보일 수 있음.
-    buffer_handling_mode: "NewestOnly"
+    buffer_handling_mode: "OldestFirst"
     # Debayering runs on the host, once per frame per camera, and it is the
     # tightest CPU budget in the rig: eight cameras x 30 Hz x 1920x1200 leaves
     # 33 ms per frame in a single acquisition thread. hq_linear does not fit — it
@@ -97,7 +126,7 @@ flir_camera:
     publish_rgb_compressed: true
     rgb_compression_format: "jpeg"
     # JPEG quality: 0~100, 높을수록 화질↑ 용량↑
-    rgb_jpeg_quality: 80
+    rgb_jpeg_quality: 75
     # PNG compression: 0~9, 높을수록 CPU↑ 용량↓
     rgb_png_compression_level: 0
 
@@ -150,9 +179,9 @@ flir_camera:
     # Enables manual frame-rate limiting. This is not an "auto FPS" switch:
     # true means the value below is applied, false means the camera free-runs /
     # uses its own maximum feasible acquisition rate.
-    camera.AcquisitionFrameRateEnable: false
+    camera.AcquisitionFrameRateEnable: true
     # Target frame rate in Hz.
-    # camera.AcquisitionFrameRate: 10.0
+    camera.AcquisitionFrameRate: 30.0
     # Multi-frame / burst related controls if you need them:
     # camera.AcquisitionFrameCount: 1
     # camera.AcquisitionBurstFrameCount: 1
@@ -161,7 +190,7 @@ flir_camera:
     # Exposure
     # --------------------------------------------------------------------------
     # Off | Once | Continuous
-    camera.ExposureAuto: "Off"
+    camera.ExposureAuto: "Continuous"
     # Exposure time, in microseconds. Set this explicitly: the cameras persist
     # exposure in flash, so leaving it unset means each one keeps whatever value
     # it was last given. That is how two of the eight ended up at 15 ms while the
@@ -181,7 +210,7 @@ flir_camera:
     # here pinned all eight cameras to 14993 us — the camera's auto upper limit —
     # and brought the mean to 45-72. If you shorten this for a moving rig, raise
     # camera.GainDB_Val to compensate or the image goes dark again.
-    camera.ExposureTime: 18000.0
+    # camera.ExposureTime: 18000.0
     # Exposure mode is camera-specific; inspect valid enum values if needed:
     # camera.ExposureMode: "Timed"
 
@@ -214,7 +243,7 @@ flir_camera:
     # Tone / black level
     # --------------------------------------------------------------------------
     # Enables/disables gamma correction.
-    # camera.GammaEnable: false
+    camera.GammaEnable: true
     # Gamma value when gamma is enabled.
     # camera.Gamma_FloatVal: 1.0
     # Video-signal offset in percent.
@@ -323,6 +352,10 @@ flir_camera:
     # scheduled action, so fps == rate_hz, regardless of the free-run limits
     # above. Exposure time must stay below 1/rate_hz or triggers get skipped.
     ptp_action.rate_hz: 30.0
+    # 촬영 격자를 PTP 초에 맞춘다: n 번째 촬영이 PTP 시각 n/rate 초 (30 Hz 면 매 초 0, 1/30, 2/30 … 초).
+    # 기동할 때마다 같은 순간에 찍혀, 같은 PTP 시계에 위상 고정(phase_lock_enable)한 라이다가 카메라가 찍는 순간
+    # 늘 같은 방향을 본다. false 면 예전처럼 sender 가 시작한 시각(카메라 시각 + schedule_ahead)부터 센다.
+    ptp_action.align_to_second: true
     # sender가 카메라 timestamp를 latch한 뒤 이만큼 미래의 PTP time으로 action을 예약합니다.
     ptp_action.schedule_ahead_ms: 100.0
     ptp_action.start_delay_ms: 1000.0

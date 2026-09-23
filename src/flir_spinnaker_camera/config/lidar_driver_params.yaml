@@ -16,7 +16,10 @@ ouster/os_driver:
   ros__parameters:
     # sensor_hostname[required]: hostname or IP address of the sensor (IP4 or
     # IP6).
-    sensor_hostname: '169.254.133.224'
+    # 2026-09-22: 라이다가 카메라 스위치(enp3s0f1)에 물려 있어 카메라망 고정 주소를 줬다 (센서 API ipv4 override).
+    # link-local 로 두면 PC 가 카메라 NIC 에 169.254 주소를 얹어야 닿는데, 그러면 카메라 IP 자동 맞춤이 꼬인다.
+    # 되돌리기: curl -X DELETE http://192.168.1.200/api/v1/system/network/ipv4/override (다시 169.254.133.224)
+    sensor_hostname: '192.168.1.200'
     # udp_dest[optional]: hostname or multicast group IP where the sensor will
     # send UDP data packets.
     udp_dest: ''
@@ -159,7 +162,8 @@ ouster/os_driver:
     persist_config: false
     # attempt_reconnect[optional]: attempting to reconnect to the sensor after
     # connection loss or sensor powered down
-    attempt_reconnect: false
+    # 기동 때 센서가 안 보이면 (케이블 · 전원 · 부팅 중) 드라이버가 그대로 멈춰 토픽이 하나도 안 나왔다 — 재시도한다.
+    attempt_reconnect: true
     # dormant_period_between_reconnects[optional]: wait time in seconds between
     # reconnection attempts
     dormant_period_between_reconnects: 1.0

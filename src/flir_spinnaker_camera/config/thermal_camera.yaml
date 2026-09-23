@@ -22,8 +22,22 @@ flir_camera:
     publisher_qos_reliability: "reliable"
     publisher_qos_depth: 20
     # A70 has no working PTP sync here (see ptp.* below), so its clock is not
-    # related to the host or Blackfly clocks. Keep host receive time in the header.
+    # related to the host or Blackfly clocks — camera_latched maps it onto the host clock anyway:
+    # it latches the A70's own counter (TimestampLatch, 1 GHz) every few seconds against the host clock.
     use_camera_timestamp_in_header: false
+    # header.stamp = 이 프레임이 담은 순간 (PC 시계). flir_camera.yaml 의 timestamp.* 설명 참고.
+    # A70 은 외부 트리거로 프레임을 찍을 수 없어 (TriggerSelector 에 FrameStart 가 없다) 자체 주기로 돈다 —
+    # 가시광 트리거와 위상이 맞지 않으니 프레임은 이 stamp 로 짝지어야 한다.
+    timestamp.mode: "camera_latched"
+    # 마이크로볼로미터는 노출이 없다 — ExposureTime 을 빼지 않는다.
+    timestamp.exposure_latch: "start"
+    # 대신 고정 지연을 뺀다: 화소의 열 시정수(보통 수~십수 ms — 프레임은 그만큼 과거의 장면을 지수 가중으로
+    # 담는다) + 카메라 내부 처리(NUC · NoiseReduction · 온도 변환). 카메라가 타임스탬프를 찍는 순간도 문서에 없어
+    # 추측하지 말고 잰다: 뜨거운 물체 앞을 판자로 빠르게 가로질러, 판자 가장자리가 지나가는 시각을 가시광과
+    # 열화상 header.stamp 로 비교한다. 그 차이(ns)를 여기에. 재기 전에는 0 (카메라가 찍은 시각 그대로).
+    timestamp.capture_offset_ns: 0
+    timestamp.trigger_grid_hz: 0.0
+    timestamp.latch_interval_sec: 2.0
     camera_info.yaml_path: "calibration/flir_camera_info.yaml"
 
     # Mono16 carries the full 16-bit thermal value; Mono8 is display-scaled only.
@@ -133,3 +147,9 @@ flir_camera:
     stream.StreamBufferCountManual: 32
     stream.StreamPacketResendEnable: true
     stream.StreamPacketResendTimeout: 200
+    # 프레임 ID · 카메라 타임스탬프 · 노출 시간을 GVSP leader 가 아니라 이미지 payload 안의 chunk data 로 받는다.
+    # leader 패킷만 유실되면 영상은 새 프레임인데 frame_id/타임스탬프는 버퍼 한 바퀴(StreamBufferCountManual,
+    # 32장) 전 값이 남는다 — 리그에서 실제로 나왔다. chunk 는 그 프레임의 픽셀과 같이 와서 틀리지 않는다.
+    # A70 의 chunk 는 Calibration 하나뿐이라 (Timestamp/FrameID 없음) 켜도 쓸 게 없다. leader 가 유실된 프레임은
+    # 노드가 frame info 가 거꾸로 간 것으로 잡아 stamp 를 직전 프레임 + 한 주기로 추정한다.
+    chunk_data.enable: false

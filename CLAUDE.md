@@ -65,6 +65,12 @@ flir_spinnaker_camera ──> flir_camera_undistort_viewer
 
 - **Thermal cameras (FLIR A70) have their own inventory and params:** `config/multicam_thermal_cameras.yaml` + `config/thermal_camera.yaml`, namespaces `thermalN`, IPs from `192.168.1.11`. `multicam.launch.py` launches them alongside the Blackflies (`enable_thermal_cameras`/`enable_visible_cameras`). The two inventory updates exclude each other by model (`thermal_model_patterns`) and serial, so an A70 never lands in `multicam_cameras.yaml` with a PTP action role. A70 has no FrameStart trigger, no Action command, and its PTP (`PtpEnable`/`PtpStatus`, no `GevIEEE1588*`) did not reach Slave against ptp4l, so it free-runs with host-arrival stamps. Output is `image_raw` mono16 where value × 0.01 = Kelvin. It sends frames in bunches (host arrival gaps 2–140 ms at a steady 33 ms capture), so its `buffer_handling_mode` is `OldestFirst`: `NewestOnly` silently dropped 4–22% of A70 frames.
 
+- **Startup `camera.*` overrides are read back before streaming** (`VerifyControlOverridesTookEffect`, called after PTP / trigger / action / chunk setup, before `BeginAcquisition`).
+  - Why: overrides of one type are written in name order, and paired GenICam registers recompute each other. On 2026-09-22, `DeviceLinkThroughputLimit` 75 MB/s went in before `GevSCPD` 0, and 13 of 14 cameras ended at 125 MB/s. Simultaneous PTP-action bursts then overflowed the switch.
+  - What it does: re-applies drifted values once, with the link limit last. Then it logs ERROR `… not in effect after startup …`, which DM_clipGUI turns into an orange row.
+  - Tolerance: camera rounding (increment, or 0.5 %) counts as a match.
+  - Skipped: nodes the startup logic sets itself (`Trigger*`, `Line*`, `GevIEEE1588*`, `Ptp*`, `Action*`, `Chunk*`, …).
+  - Don't set `GevSCPD` together with `DeviceLinkThroughputLimit`.
 - **Two mutually-exclusive frame-sync mechanisms**, both selected per-camera in `multicam_cameras.yaml`:
   - GPIO hardware trigger: `hardware_trigger_role: master|slave|none` (needs the physical trigger cable).
   - PTP scheduled action: `ptp_action_role: sender|receiver|none`. Exactly one `sender`. The PTP grandmaster is the **OS `ptp4l` (linuxptp)**, not the camera node — `multicam.launch.py` can start it via `ptp_master_interface:=<nic>`. Common per-run tunables live under `ptp.*`/`ptp_action.*` in `flir_camera.yaml`.

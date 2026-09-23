@@ -11,6 +11,10 @@ Do not judge sync from header.stamp: with use_camera_timestamp_in_header=false
 that is host arrival time, which scatters by milliseconds no matter how well
 the cameras are synchronized.
 
+This needs PTP-synced camera clocks. With GPIO hardware triggering and PTP off
+on the cameras, each camera_timestamp_ns is a separate counter and nothing here
+lines up — use check_trigger_sync.py instead.
+
 Usage:
   python3 scripts/check_multicam_sync.py
   python3 scripts/check_multicam_sync.py --duration 20 --cameras camera_center camera_rear
@@ -133,6 +137,8 @@ def main() -> int:
     rounds = group_into_rounds(stamps, window_ns)
     if not rounds:
         print("\nNo frames landed in a common window: the cameras are NOT synchronized.", file=sys.stderr)
+        print("(Without PTP on the cameras their clocks share no epoch — for GPIO triggering use "
+              "check_trigger_sync.py.)", file=sys.stderr)
         return 1
 
     full = [r for r in rounds if len(r) == len(stamps)]
