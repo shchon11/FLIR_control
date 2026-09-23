@@ -9,6 +9,24 @@
 > 작성: 2026-09-21. 하드웨어 배선 완료 시점에 맞춰 작성했으며, 아직 실측으로
 > 검증되지 않았다. 각 단계의 실측값을 채워 넣으면서 갱신할 것.
 
+## 갱신 (2026-09-24) — 이 문서에서 바뀐 것
+
+이 명세를 따라 작업하는 동안 구성이 바뀌었다. 아래는 지금 리포에 들어가 있는 것이고,
+본문에서 이와 어긋나는 부분(특히 T4·TAI·`timestamp.utc_offset_ns`)은 더 이상 맞지 않는다.
+
+- **카메라에는 PTP 를 주지 않는다.** 노출 정렬은 GPIO 하드웨어 트리거가 한다. 그래서
+  `camera_timestamp_ns` 는 카메라마다 전원을 넣은 뒤부터 세는 카운터이고, 카메라끼리 직접
+  비교할 수 없다 — `scripts/check_multicam_sync.py` 대신 `scripts/check_trigger_sync.py` 를 쓴다.
+- **header.stamp 는 노출 시작 시각이다** (`timestamp.mode: camera_latched`). 카메라 카운터를
+  주기적으로 래치해 PC 시계로 옮기고, 노출 종료 래치를 보정한다 (`timestamp.exposure_latch: end`).
+  트리거 펄스가 PPS 격자 위에 있으면 `timestamp.trigger_grid_hz` 로 그 격자에 맞춘다.
+- **T-1(노출 래치 판별)은 끝났다.** Blackfly S 는 노출이 끝날 때 타임스탬프를 찍는다
+  (`config/flir_camera.yaml` 의 `camera.ExposureTime` 주석에 실측 기록).
+- **Orin 이 grandmaster다.** PC 는 eno1 에서 slave, `phc2sys` 로 시스템 시계를 맞춘다
+  (`scripts/ptp_setup.py`, DM_clipGUI 의 `ptp` 명령). 82599 카메라 포트에는 하드웨어
+  타임스탬프를 쓰지 않는다.
+- **라이다는 카메라 스위치에 물려 192.168.1.200 고정**이고, PPS/NMEA 는 아직 안 물렸다.
+
 ## 1. 배선 전제
 
 ```
