@@ -384,6 +384,12 @@ def _camera_parameter_overrides(
     if force_ip_rediscovery_timeout_ms:
         overrides["network.force_ip.rediscovery_timeout_ms"] = int(force_ip_rediscovery_timeout_ms)
 
+    # Per-camera image_raw: raw 1920x1200 is ~69 MB/s per camera, so it is turned on only for the
+    # cameras that need it (DM_clipGUI camera table 'raw' column). Unset = the shared publish_raw.
+    publish_raw = str(camera.get("publish_raw", "")).strip()
+    if publish_raw:
+        overrides["publish_raw"] = _parse_bool(publish_raw)
+
     return overrides
 
 

@@ -10,85 +10,249 @@
 #
 # which rewrites this file (comments are not preserved). Until then, either
 # ignore the TF poses or launch with publish_extrinsics_tf:=false.
+# DM_clipGUI 온라인 캘리브레이션 적용 2026-10-03T12:25:37Z — 시리얼 25415248, 25415249, 25415250, 25415251, 25415254, 25415255, 26075999, 26076002, 26076003, 26076471, 26076472, 26076473, 26076474, 26076477, 89905156, 89905157
 version: 1
 reference_frame: "flir_rig_frame"
 extrinsics_by_serial:
   "25415248":
-    camera_name: "camera_center"
-    parent_frame: "flir_rig_frame"
-    child_frame: "camera_center_optical_frame"
-    translation_xyz_m: [0.0000000000, 0.0000000000, 0.0000000000]
-    rotation_xyzw: [0.0000000000, 0.0000000000, 0.0000000000, 1.0000000000]
+    camera_name: "camera_top"
+    parent_frame: "os_lidar"
+    child_frame: "camera_top_optical_frame"
+    translation_xyz_m: [-0.11230421836223743, -0.012241061514760135, -0.1922474547666842]
+    rotation_xyzw: [-0.49559285317803714, -0.5010061626410635, 0.49841172674656015, 0.5049418773641586]
     calibration:
-      method: "reference_camera_identity"
-      reference_camera: "camera_center"
+      method: "nontarget_cal (targetless, online)"
+      calib_name: "camera_top"
+      generated_at_utc: "2026-10-03T12:25:37Z"
+      source: "/home/ircv/DM/DM_clipGUI/online_calib/calib_20261003_203257_3960/out (calib_20261003_203257_3960)"
+      convention: "parent->child: x_os_lidar = R(q) x_optical + t"
+      rot_1sigma_deg: 0.13492365029281697
+      pos_1sigma_mm: 24.325424817778107
+      time_offset_s: 0.0
   "26076473":
-    camera_name: "camera_front_right"
-    parent_frame: "flir_rig_frame"
-    child_frame: "camera_front_right_optical_frame"
-    translation_xyz_m: [0.0000000000, 0.0000000000, 0.0000000000]
-    rotation_xyzw: [0.0000000000, 0.0000000000, 0.0000000000, 1.0000000000]
+    camera_name: "camera_3"
+    parent_frame: "os_lidar"
+    child_frame: "camera_3_optical_frame"
+    translation_xyz_m: [-0.7564383148356311, -0.30080123923746, -0.37486478247921684]
+    rotation_xyzw: [-0.5809920084221505, -0.5739106669607393, 0.4137681833541969, 0.40233160818166286]
     calibration:
-      placeholder: true
-      reference_camera: "camera_center"
-      observations: 0
+      method: "nontarget_cal (targetless, online)"
+      calib_name: "camera_front3"
+      generated_at_utc: "2026-10-03T12:25:37Z"
+      source: "/home/ircv/DM/DM_clipGUI/online_calib/calib_20261003_203257_3960/out (calib_20261003_203257_3960)"
+      convention: "parent->child: x_os_lidar = R(q) x_optical + t"
+      rot_1sigma_deg: 0.028947449996327996
+      pos_1sigma_mm: 18.83960354479055
+      time_offset_s: 0.0
   "26076477":
-    camera_name: "camera_front_left"
-    parent_frame: "flir_rig_frame"
-    child_frame: "camera_front_left_optical_frame"
-    translation_xyz_m: [0.0000000000, 0.0000000000, 0.0000000000]
-    rotation_xyzw: [0.0000000000, 0.0000000000, 0.0000000000, 1.0000000000]
+    camera_name: "camera_2"
+    parent_frame: "os_lidar"
+    child_frame: "camera_2_optical_frame"
+    translation_xyz_m: [-0.7506217340735202, -0.38641398491673695, -0.3585713198064734]
+    rotation_xyzw: [-0.5045101545628954, -0.49131504286839006, 0.5047496500381501, 0.49930634221940406]
     calibration:
-      placeholder: true
-      reference_camera: "camera_center"
-      observations: 0
+      method: "nontarget_cal (targetless, online)"
+      calib_name: "camera_front2"
+      generated_at_utc: "2026-10-03T12:25:37Z"
+      source: "/home/ircv/DM/DM_clipGUI/online_calib/calib_20261003_203257_3960/out (calib_20261003_203257_3960)"
+      convention: "parent->child: x_os_lidar = R(q) x_optical + t"
+      rot_1sigma_deg: 0.033163606111859166
+      pos_1sigma_mm: 21.267746904744858
+      time_offset_s: 0.0
   "25415254":
-    camera_name: "camera_side_right_1"
-    parent_frame: "flir_rig_frame"
-    child_frame: "camera_side_right_1_optical_frame"
-    translation_xyz_m: [0.0000000000, 0.0000000000, 0.0000000000]
-    rotation_xyzw: [0.0000000000, 0.0000000000, 0.0000000000, 1.0000000000]
+    camera_name: "camera_rear_right"
+    parent_frame: "os_lidar"
+    child_frame: "camera_rear_right_optical_frame"
+    translation_xyz_m: [0.7440375355481267, 0.5129292395259857, -0.3759474776849026]
+    rotation_xyzw: [-0.6369533592162508, 0.3131239542938512, -0.3240640948520884, 0.625480830927865]
     calibration:
-      placeholder: true
-      reference_camera: "camera_center"
-      observations: 0
+      method: "nontarget_cal (targetless, online)"
+      calib_name: "camera_rear_right"
+      generated_at_utc: "2026-10-03T12:25:37Z"
+      source: "/home/ircv/DM/DM_clipGUI/online_calib/calib_20261003_203257_3960/out (calib_20261003_203257_3960)"
+      convention: "parent->child: x_os_lidar = R(q) x_optical + t"
+      rot_1sigma_deg: 0.1254609210920254
+      pos_1sigma_mm: 9.305654040070495
+      time_offset_s: 0.0
   "26076472":
-    camera_name: "camera_side_right_2"
-    parent_frame: "flir_rig_frame"
-    child_frame: "camera_side_right_2_optical_frame"
-    translation_xyz_m: [0.0000000000, 0.0000000000, 0.0000000000]
-    rotation_xyzw: [0.0000000000, 0.0000000000, 0.0000000000, 1.0000000000]
+    camera_name: "camera_1"
+    parent_frame: "os_lidar"
+    child_frame: "camera_1_optical_frame"
+    translation_xyz_m: [-0.7344681586614793, -0.4737311370256603, -0.3423052529145767]
+    rotation_xyzw: [-0.4088847154642991, -0.3999352680523417, 0.5822885647758094, 0.5777586850570998]
     calibration:
-      placeholder: true
-      reference_camera: "camera_center"
-      observations: 0
+      method: "nontarget_cal (targetless, online)"
+      calib_name: "camera_front1"
+      generated_at_utc: "2026-10-03T12:25:37Z"
+      source: "/home/ircv/DM/DM_clipGUI/online_calib/calib_20261003_203257_3960/out (calib_20261003_203257_3960)"
+      convention: "parent->child: x_os_lidar = R(q) x_optical + t"
+      rot_1sigma_deg: 0.1317173284017106
+      pos_1sigma_mm: 20.21555731896637
+      time_offset_s: 0.0
   "25415250":
-    camera_name: "camera_side_left_1"
-    parent_frame: "flir_rig_frame"
-    child_frame: "camera_side_left_1_optical_frame"
-    translation_xyz_m: [0.0000000000, 0.0000000000, 0.0000000000]
-    rotation_xyzw: [0.0000000000, 0.0000000000, 0.0000000000, 1.0000000000]
+    camera_name: "camera_4"
+    parent_frame: "os_lidar"
+    child_frame: "camera_4_optical_frame"
+    translation_xyz_m: [-0.7517242139095774, -0.0933952586355446, -0.3644665940850214]
+    rotation_xyzw: [-0.5840791256003226, -0.40339360432696725, 0.40782898433345494, 0.574282765337428]
     calibration:
-      placeholder: true
-      reference_camera: "camera_center"
-      observations: 0
+      method: "nontarget_cal (targetless, online)"
+      calib_name: "camera_front4"
+      generated_at_utc: "2026-10-03T12:25:37Z"
+      source: "/home/ircv/DM/DM_clipGUI/online_calib/calib_20261003_203257_3960/out (calib_20261003_203257_3960)"
+      convention: "parent->child: x_os_lidar = R(q) x_optical + t"
+      rot_1sigma_deg: 0.02319815482630038
+      pos_1sigma_mm: 13.228516305941358
+      time_offset_s: 0.0
   "25415249":
-    camera_name: "camera_side_left_2"
-    parent_frame: "flir_rig_frame"
-    child_frame: "camera_side_left_2_optical_frame"
-    translation_xyz_m: [0.0000000000, 0.0000000000, 0.0000000000]
-    rotation_xyzw: [0.0000000000, 0.0000000000, 0.0000000000, 1.0000000000]
+    camera_name: "camera_9"
+    parent_frame: "os_lidar"
+    child_frame: "camera_9_optical_frame"
+    translation_xyz_m: [-0.7542037358386916, 0.4399730985735974, -0.37421820111893134]
+    rotation_xyzw: [-0.5829155281231028, -0.3966174193576091, 0.5820700979353144, 0.4050907439385012]
     calibration:
-      placeholder: true
-      reference_camera: "camera_center"
-      observations: 0
+      method: "nontarget_cal (targetless, online)"
+      calib_name: "camera_front9"
+      generated_at_utc: "2026-10-03T12:25:37Z"
+      source: "/home/ircv/DM/DM_clipGUI/online_calib/calib_20261003_203257_3960/out (calib_20261003_203257_3960)"
+      convention: "parent->child: x_os_lidar = R(q) x_optical + t"
+      rot_1sigma_deg: 0.055605760336668
+      pos_1sigma_mm: 23.742380183688624
+      time_offset_s: 0.0
   "26076003":
-    camera_name: "camera_rear"
-    parent_frame: "flir_rig_frame"
-    child_frame: "camera_rear_optical_frame"
-    translation_xyz_m: [0.0000000000, 0.0000000000, 0.0000000000]
-    rotation_xyzw: [0.0000000000, 0.0000000000, 0.0000000000, 1.0000000000]
+    camera_name: "camera_side_left"
+    parent_frame: "os_lidar"
+    child_frame: "camera_side_left_optical_frame"
+    translation_xyz_m: [-0.163483627857681, -0.5581089494462842, -0.35156725613509354]
+    rotation_xyzw: [-0.10937407912018272, -0.6901736406658315, 0.7061288337796668, 0.11436663259732513]
     calibration:
-      placeholder: true
-      reference_camera: "camera_center"
-      observations: 0
+      method: "nontarget_cal (targetless, online)"
+      calib_name: "camera_side_left"
+      generated_at_utc: "2026-10-03T12:25:37Z"
+      source: "/home/ircv/DM/DM_clipGUI/online_calib/calib_20261003_203257_3960/out (calib_20261003_203257_3960)"
+      convention: "parent->child: x_os_lidar = R(q) x_optical + t"
+      rot_1sigma_deg: 0.028347921120145232
+      pos_1sigma_mm: 14.182743012767451
+      time_offset_s: 0.0
+  "26076474":
+    camera_name: "camera_5"
+    parent_frame: "os_lidar"
+    child_frame: "camera_5_optical_frame"
+    translation_xyz_m: [-0.7495935597747216, -0.0171146109462557, -0.3674195018740482]
+    rotation_xyzw: [-0.5089067431749602, -0.49742920021502235, 0.49907859902629864, 0.4944680672383662]
+    calibration:
+      method: "nontarget_cal (targetless, online)"
+      calib_name: "camera_front5"
+      generated_at_utc: "2026-10-03T12:25:37Z"
+      source: "/home/ircv/DM/DM_clipGUI/online_calib/calib_20261003_203257_3960/out (calib_20261003_203257_3960)"
+      convention: "parent->child: x_os_lidar = R(q) x_optical + t"
+      rot_1sigma_deg: 0.03973591571876701
+      pos_1sigma_mm: 23.97932690595608
+      time_offset_s: 0.0
+  "25415255":
+    camera_name: "camera_6"
+    parent_frame: "os_lidar"
+    child_frame: "camera_6_optical_frame"
+    translation_xyz_m: [-0.7442701788736, 0.06316467608859752, -0.3691394758776496]
+    rotation_xyzw: [-0.4108605934392008, -0.5714985452074336, 0.5832192145772147, 0.4055099669952782]
+    calibration:
+      method: "nontarget_cal (targetless, online)"
+      calib_name: "camera_front6"
+      generated_at_utc: "2026-10-03T12:25:37Z"
+      source: "/home/ircv/DM/DM_clipGUI/online_calib/calib_20261003_203257_3960/out (calib_20261003_203257_3960)"
+      convention: "parent->child: x_os_lidar = R(q) x_optical + t"
+      rot_1sigma_deg: 0.041533897045510436
+      pos_1sigma_mm: 21.235804444970142
+      time_offset_s: 0.0
+  "26076002":
+    camera_name: "camera_7"
+    parent_frame: "os_lidar"
+    child_frame: "camera_7_optical_frame"
+    translation_xyz_m: [-0.7523397926439614, 0.2639292522451321, -0.37246992483395075]
+    rotation_xyzw: [-0.41209902034015966, -0.5756697921658092, 0.4083674930662945, 0.5762071488876243]
+    calibration:
+      method: "nontarget_cal (targetless, online)"
+      calib_name: "camera_front7"
+      generated_at_utc: "2026-10-03T12:25:37Z"
+      source: "/home/ircv/DM/DM_clipGUI/online_calib/calib_20261003_203257_3960/out (calib_20261003_203257_3960)"
+      convention: "parent->child: x_os_lidar = R(q) x_optical + t"
+      rot_1sigma_deg: 0.06025887305932955
+      pos_1sigma_mm: 19.201755368361567
+      time_offset_s: 0.0
+  "26075999":
+    camera_name: "camera_8"
+    parent_frame: "os_lidar"
+    child_frame: "camera_8_optical_frame"
+    translation_xyz_m: [-0.7480411771861418, 0.34807512610951286, -0.37315024508506356]
+    rotation_xyzw: [-0.5039135886317456, -0.4974604979290604, 0.5033660864628007, 0.4952037269564635]
+    calibration:
+      method: "nontarget_cal (targetless, online)"
+      calib_name: "camera_front8"
+      generated_at_utc: "2026-10-03T12:25:37Z"
+      source: "/home/ircv/DM/DM_clipGUI/online_calib/calib_20261003_203257_3960/out (calib_20261003_203257_3960)"
+      convention: "parent->child: x_os_lidar = R(q) x_optical + t"
+      rot_1sigma_deg: 0.01902069426417997
+      pos_1sigma_mm: 19.207089735221082
+      time_offset_s: 0.0
+  "25415251":
+    camera_name: "camera_rear_left"
+    parent_frame: "os_lidar"
+    child_frame: "camera_rear_left_optical_frame"
+    translation_xyz_m: [0.7390041644285514, -0.52095122247115, -0.36250442230604424]
+    rotation_xyzw: [-0.3312374608917584, 0.6177809769457748, -0.634702674380871, 0.32523979485861637]
+    calibration:
+      method: "nontarget_cal (targetless, online)"
+      calib_name: "camera_rear_left"
+      generated_at_utc: "2026-10-03T12:25:37Z"
+      source: "/home/ircv/DM/DM_clipGUI/online_calib/calib_20261003_203257_3960/out (calib_20261003_203257_3960)"
+      convention: "parent->child: x_os_lidar = R(q) x_optical + t"
+      rot_1sigma_deg: 0.07043230120169787
+      pos_1sigma_mm: 13.454205035467817
+      time_offset_s: 0.0
+  "26076471":
+    camera_name: "camera_side_right"
+    parent_frame: "os_lidar"
+    child_frame: "camera_side_right_optical_frame"
+    translation_xyz_m: [-0.16726166283832009, 0.5233348672011998, -0.3696560100732346]
+    rotation_xyzw: [-0.7015659767601327, -0.1115519889485817, 0.10947685549813889, 0.6952525815302353]
+    calibration:
+      method: "nontarget_cal (targetless, online)"
+      calib_name: "camera_side_right"
+      generated_at_utc: "2026-10-03T12:25:37Z"
+      source: "/home/ircv/DM/DM_clipGUI/online_calib/calib_20261003_203257_3960/out (calib_20261003_203257_3960)"
+      convention: "parent->child: x_os_lidar = R(q) x_optical + t"
+      rot_1sigma_deg: 0.011907078072226457
+      pos_1sigma_mm: 12.276326253328563
+      time_offset_s: 0.0
+  "89905157":
+    camera_name: "thermal1"
+    parent_frame: "os_lidar"
+    child_frame: "thermal1_optical_frame"
+    translation_xyz_m: [-0.6899981350118669, -0.21911784529982364, -0.3757079691863553]
+    rotation_xyzw: [-0.5146172990876399, -0.4879816247614213, 0.5028052546292348, 0.4941961607420445]
+    calibration:
+      method: "nontarget_cal (targetless, online)"
+      calib_name: "thermal_left"
+      generated_at_utc: "2026-10-03T12:25:37Z"
+      source: "/home/ircv/DM/DM_clipGUI/online_calib/calib_20261003_203257_3960/out (calib_20261003_203257_3960)"
+      convention: "parent->child: x_os_lidar = R(q) x_optical + t"
+      rot_1sigma_deg: 0.026088064465671534
+      pos_1sigma_mm: 19.65663820544734
+      time_offset_s: -0.09656
+      row_readout_s: -0.0398
+  "89905156":
+    camera_name: "thermal0"
+    parent_frame: "os_lidar"
+    child_frame: "thermal0_optical_frame"
+    translation_xyz_m: [-0.6907176493444109, 0.17875907917282532, -0.382034615723928]
+    rotation_xyzw: [-0.505610240265927, -0.4993659147404556, 0.5037085538670927, 0.49119208146587806]
+    calibration:
+      method: "nontarget_cal (targetless, online)"
+      calib_name: "thermal_right"
+      generated_at_utc: "2026-10-03T12:25:37Z"
+      source: "/home/ircv/DM/DM_clipGUI/online_calib/calib_20261003_203257_3960/out (calib_20261003_203257_3960)"
+      convention: "parent->child: x_os_lidar = R(q) x_optical + t"
+      rot_1sigma_deg: 0.02762438629550792
+      pos_1sigma_mm: 21.255806046075353
+      time_offset_s: -0.09757
+      row_readout_s: -0.0385

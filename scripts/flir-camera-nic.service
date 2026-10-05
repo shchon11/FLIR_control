@@ -6,7 +6,7 @@ After=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/home/ircv/FLIR_control/scripts/setup_camera_nic.bash
+ExecStart=/home/ircv/DM/FLIR_control/scripts/setup_camera_nic.bash
 
 [Install]
 WantedBy=multi-user.target
